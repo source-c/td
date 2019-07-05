@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -62,7 +62,7 @@ void HttpChunkedByteFlow::loop() {
         need_size = 2;
         break;
       }
-      input_->cut_head(2);
+      input_->advance(2);
       total_size_ += 2;
       if (save_len_ == 0) {
         return finish(Status::OK());

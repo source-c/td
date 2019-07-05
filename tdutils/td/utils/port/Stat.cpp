@@ -1,11 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/utils/port/Stat.h"
 
+#include "td/utils/port/detail/PollableFd.h"
 #include "td/utils/port/FileFd.h"
 
 #if TD_PORT_POSIX
@@ -112,9 +113,9 @@ Stat from_native_stat(const struct ::stat &buf) {
 
 Stat fstat(int native_fd) {
   struct ::stat buf;
-  int err = fstat(native_fd, &buf);
+  int err = detail::skip_eintr([&] { return ::fstat(native_fd, &buf); });
   auto fstat_errno = errno;
-  LOG_IF(FATAL, err < 0) << Status::PosixError(fstat_errno, PSLICE() << "stat for fd " << native_fd << " failed");
+  LOG_IF(FATAL, err < 0) << Status::PosixError(fstat_errno, PSLICE() << "Stat for fd " << native_fd << " failed");
   return detail::from_native_stat(buf);
 }
 
@@ -123,8 +124,10 @@ Status update_atime(int native_fd) {
   timespec times[2];
   // access time
   times[0].tv_nsec = UTIME_NOW;
+  times[0].tv_sec = 0;
   // modify time
   times[1].tv_nsec = UTIME_OMIT;
+  times[1].tv_sec = 0;
   if (futimens(native_fd, times) < 0) {
     auto status = OS_ERROR(PSLICE() << "futimens " << tag("fd", native_fd));
     LOG(WARNING) << status;
@@ -170,13 +173,14 @@ Status update_atime(CSlice path) {
   SCOPE_EXIT {
     file.close();
   };
-  return detail::update_atime(file.get_native_fd());
+  return detail::update_atime(file.get_native_fd().fd());
 }
 
 Result<Stat> stat(CSlice path) {
   struct ::stat buf;
-  if (stat(path.c_str(), &buf) < 0) {
-    return OS_ERROR(PSLICE() << "stat for " << tag("file", path) << " failed");
+  int err = detail::skip_eintr([&] { return ::stat(path.c_str(), &buf); });
+  if (err < 0) {
+    return OS_ERROR(PSLICE() << "Stat for file \"" << path << "\" failed");
   }
   return detail::from_native_stat(buf);
 }

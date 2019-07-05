@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,12 +9,14 @@
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
 
+#include "td/telegram/Client.h"
 #include "td/telegram/ClientActor.h"
 
 #include "td/telegram/td_api.h"
 
 #include "td/utils/base64.h"
 #include "td/utils/BufferedFd.h"
+#include "td/utils/common.h"
 #include "td/utils/filesystem.h"
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
@@ -38,17 +40,7 @@ namespace td {
 
 template <class T>
 static void check_td_error(T &result) {
-  CHECK(result->get_id() != td_api::error::ID) << to_string(result);
-}
-
-static void rmrf(CSlice path) {
-  td::walk_path(path, [](CSlice path, bool is_dir) {
-    if (is_dir) {
-      td::rmdir(path).ignore();
-    } else {
-      td::unlink(path).ignore();
-    }
-  });
+  LOG_CHECK(result->get_id() != td_api::error::ID) << to_string(result);
 }
 
 class TestClient : public Actor {
@@ -77,7 +69,7 @@ class TestClient : public Actor {
   };
   void close(Promise<> close_promise) {
     close_promise_ = std::move(close_promise);
-    td_.reset();
+    td_client_.reset();
   }
 
   unique_ptr<TdCallback> make_td_callback() {
@@ -91,7 +83,11 @@ class TestClient : public Actor {
       void on_error(uint64 id, tl_object_ptr<td_api::error> error) override {
         send_closure(client_, &TestClient::on_error, id, std::move(error));
       }
-      void on_closed() override {
+      TdCallbackImpl(const TdCallbackImpl &) = delete;
+      TdCallbackImpl &operator=(const TdCallbackImpl &) = delete;
+      TdCallbackImpl(TdCallbackImpl &&) = delete;
+      TdCallbackImpl &operator=(TdCallbackImpl &&) = delete;
+      ~TdCallbackImpl() override {
         send_closure(client_, &TestClient::on_closed);
       }
 
@@ -101,7 +97,7 @@ class TestClient : public Actor {
     return make_unique<TdCallbackImpl>(actor_id(this));
   }
 
-  void add_listener(std::unique_ptr<Listener> listener) {
+  void add_listener(unique_ptr<Listener> listener) {
     auto *ptr = listener.get();
     listeners_.push_back(std::move(listener));
     ptr->start_listen(this);
@@ -143,20 +139,20 @@ class TestClient : public Actor {
   }
 
   void start_up() override {
-    rmrf(name_);
+    rmrf(name_).ignore();
     set_context(std::make_shared<td::ActorContext>());
     set_tag(name_);
     LOG(INFO) << "START UP!";
 
-    td_ = create_actor<ClientActor>("Td-proxy", make_td_callback());
+    td_client_ = create_actor<ClientActor>("Td-proxy", make_td_callback());
   }
 
-  ActorOwn<ClientActor> td_;
+  ActorOwn<ClientActor> td_client_;
 
   string name_;
 
  private:
-  std::vector<std::unique_ptr<Listener>> listeners_;
+  std::vector<unique_ptr<Listener>> listeners_;
   std::vector<Listener *> pending_remove_;
 
   Promise<> close_promise_;
@@ -183,12 +179,12 @@ class Task : public TestClient::Listener {
   void send_query(tl_object_ptr<td_api::Function> function, F callback) {
     auto id = current_query_id_++;
     sent_queries_[id] = std::forward<F>(callback);
-    send_closure(client_->td_, &ClientActor::request, id, std::move(function));
+    send_closure(client_->td_client_, &ClientActor::request, id, std::move(function));
   }
 
  protected:
   std::map<uint64, std::function<void(tl_object_ptr<td_api::Object>)>> sent_queries_;
-  TestClient *client_;
+  TestClient *client_ = nullptr;
   uint64 current_query_id_ = 1;
 
   virtual void start_up() {
@@ -241,9 +237,10 @@ class DoAuthentication : public Task {
         on_authorization_ready();
         return;
       default:
-        CHECK(false) << "Unexpected authorization state " << to_string(authorization_state);
+        LOG(ERROR) << "Unexpected authorization state " << to_string(authorization_state);
+        UNREACHABLE();
     }
-    send_query(std::move(function), [](auto res) { CHECK(res->get_id() == td_api::ok::ID) << to_string(res); });
+    send_query(std::move(function), [](auto res) { LOG_CHECK(res->get_id() == td_api::ok::ID) << to_string(res); });
   }
   void on_authorization_ready() {
     LOG(INFO) << "GOT AUTHORIZED";
@@ -278,7 +275,7 @@ class SetUsername : public Task {
  private:
   string username_;
   Promise<> promise_;
-  int32 self_id_;
+  int32 self_id_ = 0;
   string tag_;
 
   void start_up() override {
@@ -351,7 +348,7 @@ class CheckTestA : public Task {
         auto messageText = move_tl_object_as<td_api::messageText>(message->content_);
         auto text = messageText->text_->text_;
         if (text.substr(0, tag_.size()) == tag_) {
-          CHECK(text > previous_text_) << tag("now", text) << tag("previous", previous_text_);
+          LOG_CHECK(text > previous_text_) << tag("now", text) << tag("previous", previous_text_);
           previous_text_ = text;
           cnt_--;
           LOG(INFO) << "GOT " << tag("text", text) << tag("left", cnt_);
@@ -565,7 +562,7 @@ class TestFileGenerated : public Task {
       this->send_query(make_tl_object<td_api::finishFileGeneration>(id, nullptr),
                        [](auto result) { check_td_error(result); });
     } else {
-      LOG(FATAL) << "unknown " << tag("conversion", conversion);
+      LOG(FATAL) << "Unknown " << tag("conversion", conversion);
     }
   }
 
@@ -594,7 +591,7 @@ class CheckTestC : public Task {
   string username_;
   string tag_;
   Promise<> promise_;
-  int64 chat_id_;
+  int64 chat_id_ = 0;
 
   void one_file() {
     this->send_query(
@@ -618,7 +615,7 @@ class CheckTestC : public Task {
         if (text.substr(0, tag_.size()) == tag_) {
           file_id_to_check_ = messageDocument->document_->document_->id_;
           LOG(ERROR) << "GOT FILE " << to_string(messageDocument->document_->document_);
-          this->send_query(make_tl_object<td_api::downloadFile>(file_id_to_check_, 1),
+          this->send_query(make_tl_object<td_api::downloadFile>(file_id_to_check_, 1, 0, 0, false),
                            [](auto res) { check_td_error(res); });
         }
       }
@@ -675,12 +672,12 @@ class LoginTestActor : public Actor {
     bob_ = create_actor<TestClient>("BobClient", "bob");
 
     send_closure(alice_, &TestClient::add_listener,
-                 std::make_unique<DoAuthentication>(
+                 td::make_unique<DoAuthentication>(
                      "alice", alice_phone_, "33333",
                      PromiseCreator::event(self_closure(this, &LoginTestActor::start_up_fence_dec))));
 
     send_closure(bob_, &TestClient::add_listener,
-                 std::make_unique<DoAuthentication>(
+                 td::make_unique<DoAuthentication>(
                      "bob", bob_phone_, "33333",
                      PromiseCreator::event(self_closure(this, &LoginTestActor::start_up_fence_dec))));
   }
@@ -715,10 +712,10 @@ class LoginTestActor : public Actor {
 
   void init() {
     send_closure(alice_, &TestClient::add_listener,
-                 std::make_unique<SetUsername>(
+                 td::make_unique<SetUsername>(
                      alice_username_, PromiseCreator::event(self_closure(this, &LoginTestActor::init_fence_dec))));
     send_closure(bob_, &TestClient::add_listener,
-                 std::make_unique<SetUsername>(
+                 td::make_unique<SetUsername>(
                      bob_username_, PromiseCreator::event(self_closure(this, &LoginTestActor::init_fence_dec))));
   }
 
@@ -742,15 +739,15 @@ class LoginTestActor : public Actor {
     string bob_tag = PSTRING() << format::as_hex(Random::secure_int64());
 
     send_closure(bob_, &TestClient::add_listener,
-                 std::make_unique<CheckTestA>(
-                     alice_tag, PromiseCreator::event(self_closure(this, &LoginTestActor::test_a_fence))));
-    send_closure(alice_, &TestClient::add_listener,
-                 std::make_unique<CheckTestA>(
-                     bob_tag, PromiseCreator::event(self_closure(this, &LoginTestActor::test_a_fence))));
+                 td::make_unique<CheckTestA>(alice_tag,
+                                             PromiseCreator::event(self_closure(this, &LoginTestActor::test_a_fence))));
+    send_closure(
+        alice_, &TestClient::add_listener,
+        td::make_unique<CheckTestA>(bob_tag, PromiseCreator::event(self_closure(this, &LoginTestActor::test_a_fence))));
 
-    send_closure(alice_, &TestClient::add_listener, std::make_unique<TestA>(alice_tag, bob_username_));
-    send_closure(bob_, &TestClient::add_listener, std::make_unique<TestA>(bob_tag, alice_username_));
-    // send_closure(alice_, &TestClient::add_listener, std::make_unique<TestChat>(bob_username_));
+    send_closure(alice_, &TestClient::add_listener, td::make_unique<TestA>(alice_tag, bob_username_));
+    send_closure(bob_, &TestClient::add_listener, td::make_unique<TestA>(bob_tag, alice_username_));
+    // send_closure(alice_, &TestClient::add_listener, td::make_unique<TestChat>(bob_username_));
   }
 
   void timeout_expired() override {
@@ -777,8 +774,8 @@ class LoginTestActor : public Actor {
 
     send_closure(
         bob_, &TestClient::add_listener,
-        std::make_unique<CheckTestA>(tag, PromiseCreator::event(self_closure(this, &LoginTestActor::test_b_fence))));
-    send_closure(alice_, &TestClient::add_listener, std::make_unique<TestSecretChat>(tag, bob_username_));
+        td::make_unique<CheckTestA>(tag, PromiseCreator::event(self_closure(this, &LoginTestActor::test_b_fence))));
+    send_closure(alice_, &TestClient::add_listener, td::make_unique<TestSecretChat>(tag, bob_username_));
   }
 
   void test_c() {
@@ -786,9 +783,9 @@ class LoginTestActor : public Actor {
     string tag = PSTRING() << format::as_hex(Random::secure_int64());
 
     send_closure(bob_, &TestClient::add_listener,
-                 std::make_unique<CheckTestC>(
-                     alice_username_, tag, PromiseCreator::event(self_closure(this, &LoginTestActor::test_c_fence))));
-    send_closure(alice_, &TestClient::add_listener, std::make_unique<TestFileGenerated>(tag, bob_username_));
+                 td::make_unique<CheckTestC>(alice_username_, tag,
+                                             PromiseCreator::event(self_closure(this, &LoginTestActor::test_c_fence))));
+    send_closure(alice_, &TestClient::add_listener, td::make_unique<TestFileGenerated>(tag, bob_username_));
   }
 
   int32 finish_fence_ = 2;
@@ -805,7 +802,7 @@ class LoginTestActor : public Actor {
   }
 };
 
-class Tdclient_login : public td::Test {
+class Tdclient_login : public Test {
  public:
   using Test::Test;
   bool step() final {
@@ -834,6 +831,42 @@ class Tdclient_login : public td::Test {
   ConcurrentScheduler sched_;
   Status result_;
 };
-//Tdclient_login Tdclient_login("Tdclient_login");
+//RegisterTest<Tdclient_login> Tdclient_login("Tdclient_login");
+
+TEST(Client, Simple) {
+  td::Client client;
+  //client.execute({1, td::td_api::make_object<td::td_api::setLogTagVerbosityLevel>("actor", 1)});
+  client.send({3, td::make_tl_object<td::td_api::testSquareInt>(3)});
+  while (true) {
+    auto result = client.receive(10);
+    if (result.id == 3) {
+      auto test_int = td::td_api::move_object_as<td::td_api::testInt>(result.object);
+      ASSERT_EQ(test_int->value_, 9);
+      break;
+    }
+  }
+}
+
+TEST(Client, SimpleMulti) {
+  std::vector<td::Client> clients(50);
+  //for (auto &client : clients) {
+  //client.execute({1, td::td_api::make_object<td::td_api::setLogTagVerbosityLevel>("td_requests", 1)});
+  //}
+
+  for (auto &client : clients) {
+    client.send({3, td::make_tl_object<td::td_api::testSquareInt>(3)});
+  }
+
+  for (auto &client : clients) {
+    while (true) {
+      auto result = client.receive(10);
+      if (result.id == 3) {
+        auto test_int = td::td_api::move_object_as<td::td_api::testInt>(result.object);
+        ASSERT_EQ(test_int->value_, 9);
+        break;
+      }
+    }
+  }
+}
 
 }  // namespace td

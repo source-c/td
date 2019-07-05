@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -40,12 +40,12 @@ class SqliteConnectionSafe {
   }
 
   void close() {
-    LOG(INFO) << "Close sqlite db " << tag("path", name_);
+    LOG(INFO) << "Close SQLite database " << tag("path", name_);
     lsls_connection_.clear_values();
   }
   void close_and_destroy() {
     close();
-    LOG(INFO) << "Destroy sqlite db " << tag("path", name_);
+    LOG(INFO) << "Destroy SQLite database " << tag("path", name_);
     SqliteDb::destroy(name_).ignore();
   }
 

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,7 +7,6 @@
 #include "td/utils/base64.h"
 
 #include "td/utils/common.h"
-#include "td/utils/logging.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
 
@@ -135,7 +134,7 @@ string base64url_encode(Slice input) {
 static unsigned char url_char_to_value[256];
 static void init_base64url_table() {
   static bool is_inited = []() {
-    std::fill(std::begin(url_char_to_value), std::end(url_char_to_value), 64);
+    std::fill(std::begin(url_char_to_value), std::end(url_char_to_value), static_cast<unsigned char>(64));
     for (unsigned char i = 0; i < 64; i++) {
       url_char_to_value[static_cast<size_t>(url_symbols64[i])] = i;
     }

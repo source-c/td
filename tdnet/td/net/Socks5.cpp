@@ -1,11 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/net/Socks5.h"
 
+#include "td/utils/common.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/Slice.h"
@@ -101,7 +102,7 @@ void Socks5::send_ip_address() {
   request += '\x00';
   if (ip_address_.is_ipv4()) {
     request += '\x01';
-    auto ipv4 = ip_address_.get_ipv4();
+    auto ipv4 = ntohl(ip_address_.get_ipv4());
     request += static_cast<char>(ipv4 & 255);
     request += static_cast<char>((ipv4 >> 8) & 255);
     request += static_cast<char>((ipv4 >> 16) & 255);
@@ -136,7 +137,7 @@ Status Socks5::wait_ip_address_response() {
   }
   it.advance(1, c_slice);
   if (c != '\0') {
-    return Status::Error("byte must be zero");
+    return Status::Error("Byte must be zero");
   }
   it.advance(1, c_slice);
   size_t total_size = 6;

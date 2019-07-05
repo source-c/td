@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -166,6 +166,14 @@ class DialogParticipantStatus {
     return (flags_ & CAN_ADD_WEB_PAGE_PREVIEWS) != 0;
   }
 
+  void set_is_member(bool is_member) {
+    if (is_member) {
+      flags_ |= IS_MEMBER;
+    } else {
+      flags_ &= ~IS_MEMBER;
+    }
+  }
+
   bool is_member() const {
     return (flags_ & IS_MEMBER) != 0;
   }
@@ -238,9 +246,13 @@ struct DialogParticipant {
   }
 };
 
+StringBuilder &operator<<(StringBuilder &string_builder, const DialogParticipant &dialog_participant);
+
 class ChannelParticipantsFilter {
   enum class Type : int32 { Recent, Administrators, Search, Restricted, Banned, Bots } type;
   string query;
+
+  friend StringBuilder &operator<<(StringBuilder &string_builder, const ChannelParticipantsFilter &filter);
 
  public:
   explicit ChannelParticipantsFilter(const tl_object_ptr<td_api::SupergroupMembersFilter> &filter);
@@ -250,7 +262,29 @@ class ChannelParticipantsFilter {
   bool is_administrators() const {
     return type == Type::Administrators;
   }
+
+  bool is_bots() const {
+    return type == Type::Bots;
+  }
+
+  bool is_recent() const {
+    return type == Type::Recent;
+  }
+
+  bool is_search() const {
+    return type == Type::Search;
+  }
+
+  bool is_restricted() const {
+    return type == Type::Restricted;
+  }
+
+  bool is_banned() const {
+    return type == Type::Banned;
+  }
 };
+
+StringBuilder &operator<<(StringBuilder &string_builder, const ChannelParticipantsFilter &filter);
 
 enum class DialogParticipantsFilter : int32 { Administrators, Members, Restricted, Banned, Bots };
 

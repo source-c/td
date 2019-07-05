@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,6 +8,7 @@
 
 #include "td/telegram/net/NetActor.h"
 #include "td/telegram/net/NetQuery.h"
+#include "td/telegram/SendCodeHelper.h"
 #include "td/telegram/TermsOfService.h"
 
 #include "td/telegram/td_api.h"
@@ -16,135 +17,10 @@
 #include "td/actor/actor.h"
 
 #include "td/utils/common.h"
-#include "td/utils/Slice.h"
 #include "td/utils/Status.h"
 #include "td/utils/Time.h"
 
 namespace td {
-
-class SendCodeHelper {
- public:
-  void on_sent_code(telegram_api::object_ptr<telegram_api::auth_sentCode> sent_code);
-  td_api::object_ptr<td_api::authorizationStateWaitCode> get_authorization_state_wait_code(
-      const TermsOfService &terms_of_service) const;
-  td_api::object_ptr<td_api::authenticationCodeInfo> get_authentication_code_info_object() const;
-  Result<telegram_api::auth_resendCode> resend_code();
-
-  Result<telegram_api::auth_sendCode> send_code(Slice phone_number, bool allow_flash_call, bool is_current_phone_number,
-                                                int32 api_id, const string &api_hash);
-
-  Result<telegram_api::account_sendChangePhoneCode> send_change_phone_code(Slice phone_number, bool allow_flash_call,
-                                                                           bool is_current_phone_number);
-
-  Result<telegram_api::account_sendVerifyPhoneCode> send_verify_phone_code(const string &hash, Slice phone_number,
-                                                                           bool allow_flash_call,
-                                                                           bool is_current_phone_number);
-
-  Result<telegram_api::account_sendConfirmPhoneCode> send_confirm_phone_code(Slice phone_number, bool allow_flash_call,
-                                                                             bool is_current_phone_number);
-
-  Slice phone_number() const {
-    return phone_number_;
-  }
-  Slice phone_code_hash() const {
-    return phone_code_hash_;
-  }
-  bool phone_registered() const {
-    return phone_registered_;
-  }
-
-  template <class T>
-  void store(T &storer) const;
-  template <class T>
-  void parse(T &parser);
-
- private:
-  static constexpr int32 AUTH_SEND_CODE_FLAG_ALLOW_FLASH_CALL = 1 << 0;
-
-  static constexpr int32 SENT_CODE_FLAG_IS_USER_REGISTERED = 1 << 0;
-  static constexpr int32 SENT_CODE_FLAG_HAS_NEXT_TYPE = 1 << 1;
-  static constexpr int32 SENT_CODE_FLAG_HAS_TIMEOUT = 1 << 2;
-
-  struct AuthenticationCodeInfo {
-    enum class Type : int32 { None, Message, Sms, Call, FlashCall };
-    Type type = Type::None;
-    int32 length = 0;
-    string pattern;
-
-    AuthenticationCodeInfo() = default;
-    AuthenticationCodeInfo(Type type, int length, string pattern)
-        : type(type), length(length), pattern(std::move(pattern)) {
-    }
-
-    template <class T>
-    void store(T &storer) const;
-    template <class T>
-    void parse(T &parser);
-  };
-
-  string phone_number_;
-  bool phone_registered_;
-  string phone_code_hash_;
-
-  SendCodeHelper::AuthenticationCodeInfo sent_code_info_;
-  SendCodeHelper::AuthenticationCodeInfo next_code_info_;
-  Timestamp next_code_timestamp_;
-
-  static AuthenticationCodeInfo get_authentication_code_info(
-      tl_object_ptr<telegram_api::auth_CodeType> &&code_type_ptr);
-  static AuthenticationCodeInfo get_authentication_code_info(
-      tl_object_ptr<telegram_api::auth_SentCodeType> &&sent_code_type_ptr);
-
-  static tl_object_ptr<td_api::AuthenticationCodeType> get_authentication_code_type_object(
-      const AuthenticationCodeInfo &authentication_code_info);
-};
-
-class PhoneNumberManager : public NetActor {
- public:
-  enum class Type : int32 { ChangePhone, VerifyPhone, ConfirmPhone };
-  PhoneNumberManager(Type type, ActorShared<> parent);
-  void get_state(uint64 query_id);
-
-  void set_phone_number(uint64 query_id, string phone_number, bool allow_flash_call, bool is_current_phone_number);
-  void set_phone_number_and_hash(uint64 query_id, string hash, string phone_number, bool allow_flash_call,
-                                 bool is_current_phone_number);
-
-  void resend_authentication_code(uint64 query_id);
-  void check_code(uint64 query_id, string code);
-
- private:
-  Type type_;
-
-  enum class State : int32 { Ok, WaitCode } state_ = State::Ok;
-  enum class NetQueryType : int32 { None, SendCode, CheckCode };
-
-  ActorShared<> parent_;
-  uint64 query_id_ = 0;
-  uint64 net_query_id_ = 0;
-  NetQueryType net_query_type_;
-
-  SendCodeHelper send_code_helper_;
-
-  void on_new_query(uint64 query_id);
-  void on_query_error(Status status);
-  void on_query_error(uint64 id, Status status);
-  void on_query_ok();
-  void start_net_query(NetQueryType net_query_type, NetQueryPtr net_query);
-
-  template <class T>
-  void process_send_code_result(uint64 query_id, T r_send_code);
-
-  template <class T>
-  void send_new_check_code_query(const T &query);
-
-  template <class T>
-  void process_check_code_result(T result);
-
-  void on_check_code_result(NetQueryPtr &result);
-  void on_send_code_result(NetQueryPtr &result);
-  void on_result(NetQueryPtr result) override;
-  void tear_down() override;
-};
 
 class AuthManager : public NetActor {
  public:
@@ -166,10 +42,14 @@ class AuthManager : public NetActor {
   void logout(uint64 query_id);
   void delete_account(uint64 query_id, const string &reason);
 
-  void on_closing();
+  void on_authorization_lost();
+  void on_closing(bool destroy_flag);
+
+  // can return nullptr if state isn't initialized yet
+  tl_object_ptr<td_api::AuthorizationState> get_current_authorization_state_object() const;
 
  private:
-  static constexpr size_t MAX_NAME_LENGTH = 255;  // server side limit
+  static constexpr size_t MAX_NAME_LENGTH = 64;  // server side limit
 
   enum class State : int32 {
     None,
@@ -178,6 +58,7 @@ class AuthManager : public NetActor {
     WaitPassword,
     Ok,
     LoggingOut,
+    DestroyingKeys,
     Closing
   } state_ = State::None;
   enum class NetQueryType : int32 {
@@ -206,10 +87,10 @@ class AuthManager : public NetActor {
     bool has_recovery_ = false;
     string email_address_pattern_;
 
-    template <class T>
-    void store(T &storer) const;
-    template <class T>
-    void parse(T &parser);
+    template <class StorerT>
+    void store(StorerT &storer) const;
+    template <class ParserT>
+    void parse(ParserT &parser);
   };
 
   struct DbState {
@@ -247,10 +128,10 @@ class AuthManager : public NetActor {
       return state;
     }
 
-    template <class T>
-    void store(T &storer) const;
-    template <class T>
-    void parse(T &parser);
+    template <class StorerT>
+    void store(StorerT &storer) const;
+    template <class ParserT>
+    void parse(ParserT &parser);
   };
 
   bool load_state();
@@ -288,6 +169,8 @@ class AuthManager : public NetActor {
   void on_query_ok();
   void start_net_query(NetQueryType net_query_type, NetQueryPtr net_query);
 
+  void destroy_auth_keys();
+
   void on_send_code_result(NetQueryPtr &result);
   void on_get_password_result(NetQueryPtr &result);
   void on_request_password_recovery_result(NetQueryPtr &result);
@@ -305,4 +188,5 @@ class AuthManager : public NetActor {
   void start_up() override;
   void tear_down() override;
 };
+
 }  // namespace td

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,7 +7,6 @@
 #pragma once
 
 #include "td/utils/common.h"
-#include "td/utils/logging.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
 #include "td/utils/StringBuilder.h"
@@ -17,12 +16,12 @@
 
 #if !TD_WINDOWS
 #include <getopt.h>
+#include <unistd.h>
 #endif
 
 namespace td {
 
 class OptionsParser {
- public:
   class Option {
    public:
     enum Type { NoArg, Arg, OptionalArg };
@@ -33,6 +32,7 @@ class OptionsParser {
     std::function<Status(Slice)> arg_callback;
   };
 
+ public:
   void set_description(std::string description) {
     description_ = std::move(description);
   }
@@ -57,9 +57,8 @@ class OptionsParser {
 #if TD_WINDOWS
     return -1;
 #else
-    // use getopt. long keys are not supported for now
     char buff[1024];
-    StringBuilder sb({buff, sizeof(buff)});
+    StringBuilder sb(MutableSlice{buff, sizeof(buff)});
     for (auto &opt : options_) {
       CHECK(opt.type != Option::OptionalArg);
       sb << opt.short_key;

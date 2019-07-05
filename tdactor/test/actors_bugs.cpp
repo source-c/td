@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -17,15 +17,15 @@ TEST(MultiTimeout, bug) {
   sched.init(threads_n);
 
   sched.start();
-  std::unique_ptr<MultiTimeout> multi_timeout;
+  unique_ptr<MultiTimeout> multi_timeout;
   struct Data {
     MultiTimeout *multi_timeout;
   };
   Data data;
 
   {
-    auto guard = sched.get_current_guard();
-    multi_timeout = std::make_unique<MultiTimeout>("MultiTimeout");
+    auto guard = sched.get_main_guard();
+    multi_timeout = make_unique<MultiTimeout>("MultiTimeout");
     data.multi_timeout = multi_timeout.get();
     multi_timeout->set_callback([](void *void_data, int64 key) {
       auto &data = *static_cast<Data *>(void_data);

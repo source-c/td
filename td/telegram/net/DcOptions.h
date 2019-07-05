@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -69,7 +69,7 @@ class DcOption {
     }
     if (!option.secret_.empty()) {
       flags_ |= Flags::HasSecret;
-      if (option.secret_.size() != 16u) {
+      if (option.secret_.size() != 16u && option.secret_.size() != 17u) {
         return;
       }
       secret_ = option.secret_.as_slice().str();
@@ -81,17 +81,17 @@ class DcOption {
     switch (ip_port_ref.get_id()) {
       case telegram_api::ipPort::ID: {
         auto &ip_port = static_cast<const telegram_api::ipPort &>(ip_port_ref);
-        init_ip_address(IPAddress::ipv4_to_str(ip_port.ipv4_), ip_port.port_);
+        init_ip_address(IPAddress::ipv4_to_str(static_cast<uint32>(ip_port.ipv4_)), ip_port.port_);
         break;
       }
       case telegram_api::ipPortSecret::ID: {
         auto &ip_port = static_cast<const telegram_api::ipPortSecret &>(ip_port_ref);
-        if (ip_port.secret_.size() != 16u) {
+        if (ip_port.secret_.size() != 16u && ip_port.secret_.size() != 17u) {
           return;
         }
         flags_ |= Flags::HasSecret;
         secret_ = ip_port.secret_.as_slice().str();
-        init_ip_address(IPAddress::ipv4_to_str(ip_port.ipv4_), ip_port.port_);
+        init_ip_address(IPAddress::ipv4_to_str(static_cast<uint32>(ip_port.ipv4_)), ip_port.port_);
         break;
       }
       default:
@@ -149,10 +149,15 @@ class DcOption {
   void parse(ParserT &parser) {
     flags_ = parser.fetch_int();
     auto raw_dc_id = parser.fetch_int();
-    if ((flags_ & Flags::Cdn) != 0) {
-      dc_id_ = DcId::external(raw_dc_id);
+    if (!DcId::is_valid(raw_dc_id)) {
+      LOG(ERROR) << "Have invalid DC ID " << raw_dc_id;
+      dc_id_ = DcId::invalid();
     } else {
-      dc_id_ = DcId::internal(raw_dc_id);
+      if ((flags_ & Flags::Cdn) != 0) {
+        dc_id_ = DcId::external(raw_dc_id);
+      } else {
+        dc_id_ = DcId::internal(raw_dc_id);
+      }
     }
     auto ip = parser.template fetch_string<std::string>();
     auto port = parser.fetch_int();

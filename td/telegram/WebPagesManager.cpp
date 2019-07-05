@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,47 +7,44 @@
 #include "td/telegram/WebPagesManager.h"
 
 #include "td/telegram/secret_api.h"
-#include "td/telegram/telegram_api.hpp"
 
 #include "td/telegram/AnimationsManager.h"
-#include "td/telegram/AnimationsManager.hpp"
 #include "td/telegram/AudiosManager.h"
-#include "td/telegram/AudiosManager.hpp"
-#include "td/telegram/ChannelId.h"
-#include "td/telegram/ContactsManager.h"
+#include "td/telegram/Document.h"
+#include "td/telegram/Document.hpp"
 #include "td/telegram/DocumentsManager.h"
-#include "td/telegram/DocumentsManager.hpp"
+#include "td/telegram/FileReferenceManager.h"
+#include "td/telegram/files/FileId.h"
 #include "td/telegram/files/FileManager.h"
-#include "td/telegram/files/FileManager.hpp"
+#include "td/telegram/files/FileSourceId.h"
 #include "td/telegram/Global.h"
 #include "td/telegram/logevent/LogEvent.h"
 #include "td/telegram/MessageEntity.h"
 #include "td/telegram/MessagesManager.h"
 #include "td/telegram/Photo.h"
-#include "td/telegram/Photo.hpp"
 #include "td/telegram/StickersManager.h"
-#include "td/telegram/StickersManager.hpp"
 #include "td/telegram/Td.h"
-#include "td/telegram/Version.h"
+#include "td/telegram/TdDb.h"
 #include "td/telegram/VideoNotesManager.h"
-#include "td/telegram/VideoNotesManager.hpp"
 #include "td/telegram/VideosManager.h"
-#include "td/telegram/VideosManager.hpp"
 #include "td/telegram/VoiceNotesManager.h"
-#include "td/telegram/VoiceNotesManager.hpp"
+#include "td/telegram/WebPageBlock.h"
 
 #include "td/actor/PromiseFuture.h"
 
+#include "td/db/binlog/BinlogEvent.h"
 #include "td/db/binlog/BinlogHelper.h"
+#include "td/db/SqliteKeyValue.h"
 #include "td/db/SqliteKeyValueAsync.h"
 
 #include "td/utils/buffer.h"
+#include "td/utils/common.h"
+#include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
+#include "td/utils/Slice.h"
 #include "td/utils/StringBuilder.h"
 #include "td/utils/tl_helpers.h"
-
-#include <type_traits>
 
 namespace td {
 
@@ -126,43 +123,61 @@ class GetWebPageQuery : public Td::ResultHandler {
 
 class WebPagesManager::WebPageInstantView {
  public:
-  vector<unique_ptr<PageBlock>> page_blocks;
+  vector<unique_ptr<WebPageBlock>> page_blocks;
+  string url;
   int32 hash = 0;
+  bool is_v2 = false;
+  bool is_rtl = false;
   bool is_empty = true;
   bool is_full = false;
   bool is_loaded = false;
   bool was_loaded_from_database = false;
 
-  template <class T>
-  void store(T &storer) const {
+  template <class StorerT>
+  void store(StorerT &storer) const {
     using ::td::store;
+    bool has_url = !url.empty();
     BEGIN_STORE_FLAGS();
     STORE_FLAG(is_full);
     STORE_FLAG(is_loaded);
+    STORE_FLAG(is_rtl);
+    STORE_FLAG(is_v2);
+    STORE_FLAG(has_url);
     END_STORE_FLAGS();
 
     store(page_blocks, storer);
     store(hash, storer);
+    if (has_url) {
+      store(url, storer);
+    }
     CHECK(!is_empty);
   }
 
-  template <class T>
-  void parse(T &parser) {
+  template <class ParserT>
+  void parse(ParserT &parser) {
     using ::td::parse;
+    bool has_url;
     BEGIN_PARSE_FLAGS();
     PARSE_FLAG(is_full);
     PARSE_FLAG(is_loaded);
+    PARSE_FLAG(is_rtl);
+    PARSE_FLAG(is_v2);
+    PARSE_FLAG(has_url);
     END_PARSE_FLAGS();
 
     parse(page_blocks, parser);
     parse(hash, parser);
+    if (has_url) {
+      parse(url, parser);
+    }
     is_empty = false;
   }
 
   friend StringBuilder &operator<<(StringBuilder &string_builder,
                                    const WebPagesManager::WebPageInstantView &instant_view) {
-    return string_builder << "InstantView(size = " << instant_view.page_blocks.size()
+    return string_builder << "InstantView(url = " << instant_view.url << ", size = " << instant_view.page_blocks.size()
                           << ", hash = " << instant_view.hash << ", is_empty = " << instant_view.is_empty
+                          << ", is_v2 = " << instant_view.is_v2 << ", is_rtl = " << instant_view.is_rtl
                           << ", is_full = " << instant_view.is_full << ", is_loaded = " << instant_view.is_loaded
                           << ", was_loaded_from_database = " << instant_view.was_loaded_from_database << ")";
   }
@@ -182,14 +197,15 @@ class WebPagesManager::WebPage {
   Dimensions embed_dimensions;
   int32 duration = 0;
   string author;
-  DocumentsManager::DocumentType document_type = DocumentsManager::DocumentType::Unknown;
-  FileId document_file_id;
+  Document document;
   WebPageInstantView instant_view;
 
-  uint64 logevent_id = 0;
+  FileSourceId file_source_id;
 
-  template <class T>
-  void store(T &storer) const {
+  mutable uint64 logevent_id = 0;
+
+  template <class StorerT>
+  void store(StorerT &storer) const {
     using ::td::store;
     bool has_type = !type.empty();
     bool has_site_name = !site_name.empty();
@@ -200,8 +216,9 @@ class WebPagesManager::WebPage {
     bool has_embed_dimensions = has_embed && embed_dimensions != Dimensions();
     bool has_duration = duration > 0;
     bool has_author = !author.empty();
-    bool has_document = document_type != DocumentsManager::DocumentType::Unknown;
+    bool has_document = !document.empty();
     bool has_instant_view = !instant_view.is_empty;
+    bool is_instant_view_v2 = instant_view.is_v2;
     bool has_no_hash = true;
     BEGIN_STORE_FLAGS();
     STORE_FLAG(has_type);
@@ -216,6 +233,7 @@ class WebPagesManager::WebPage {
     STORE_FLAG(has_document);
     STORE_FLAG(has_instant_view);
     STORE_FLAG(has_no_hash);
+    STORE_FLAG(is_instant_view_v2);
     END_STORE_FLAGS();
 
     store(url, storer);
@@ -249,41 +267,12 @@ class WebPagesManager::WebPage {
       store(author, storer);
     }
     if (has_document) {
-      Td *td = storer.context()->td().get_actor_unsafe();
-      CHECK(td != nullptr);
-
-      store(document_type, storer);
-      switch (document_type) {
-        case DocumentsManager::DocumentType::Animation:
-          td->animations_manager_->store_animation(document_file_id, storer);
-          break;
-        case DocumentsManager::DocumentType::Audio:
-          td->audios_manager_->store_audio(document_file_id, storer);
-          break;
-        case DocumentsManager::DocumentType::General:
-          td->documents_manager_->store_document(document_file_id, storer);
-          break;
-        case DocumentsManager::DocumentType::Sticker:
-          td->stickers_manager_->store_sticker(document_file_id, false, storer);
-          break;
-        case DocumentsManager::DocumentType::Video:
-          td->videos_manager_->store_video(document_file_id, storer);
-          break;
-        case DocumentsManager::DocumentType::VideoNote:
-          td->video_notes_manager_->store_video_note(document_file_id, storer);
-          break;
-        case DocumentsManager::DocumentType::VoiceNote:
-          td->voice_notes_manager_->store_voice_note(document_file_id, storer);
-          break;
-        case DocumentsManager::DocumentType::Unknown:
-        default:
-          UNREACHABLE();
-      }
+      store(document, storer);
     }
   }
 
-  template <class T>
-  void parse(T &parser) {
+  template <class ParserT>
+  void parse(ParserT &parser) {
     using ::td::parse;
     bool has_type;
     bool has_site_name;
@@ -296,6 +285,7 @@ class WebPagesManager::WebPage {
     bool has_author;
     bool has_document;
     bool has_instant_view;
+    bool is_instant_view_v2;
     bool has_no_hash;
     BEGIN_PARSE_FLAGS();
     PARSE_FLAG(has_type);
@@ -310,6 +300,7 @@ class WebPagesManager::WebPage {
     PARSE_FLAG(has_document);
     PARSE_FLAG(has_instant_view);
     PARSE_FLAG(has_no_hash);
+    PARSE_FLAG(is_instant_view_v2);
     END_PARSE_FLAGS();
 
     parse(url, parser);
@@ -349,1040 +340,17 @@ class WebPagesManager::WebPage {
       parse(author, parser);
     }
     if (has_document) {
-      Td *td = parser.context()->td().get_actor_unsafe();
-      CHECK(td != nullptr);
-
-      parse(document_type, parser);
-      switch (document_type) {
-        case DocumentsManager::DocumentType::Animation:
-          document_file_id = td->animations_manager_->parse_animation(parser);
-          break;
-        case DocumentsManager::DocumentType::Audio:
-          document_file_id = td->audios_manager_->parse_audio(parser);
-          break;
-        case DocumentsManager::DocumentType::General:
-          document_file_id = td->documents_manager_->parse_document(parser);
-          break;
-        case DocumentsManager::DocumentType::Sticker:
-          document_file_id = td->stickers_manager_->parse_sticker(false, parser);
-          break;
-        case DocumentsManager::DocumentType::Video:
-          document_file_id = td->videos_manager_->parse_video(parser);
-          break;
-        case DocumentsManager::DocumentType::VideoNote:
-          document_file_id = td->video_notes_manager_->parse_video_note(parser);
-          break;
-        case DocumentsManager::DocumentType::VoiceNote:
-          document_file_id = td->voice_notes_manager_->parse_voice_note(parser);
-          break;
-        case DocumentsManager::DocumentType::Unknown:
-        default:
-          UNREACHABLE();
-      }
-      if (!document_file_id.is_valid()) {
-        LOG(ERROR) << "Parse invalid document_file_id";
-        document_type = DocumentsManager::DocumentType::Unknown;
-      }
+      parse(document, parser);
     }
 
     if (has_instant_view) {
       instant_view.is_empty = false;
     }
-  }
-};
-
-class WebPagesManager::RichText {
- public:
-  enum class Type : int32 { Plain, Bold, Italic, Underline, Strikethrough, Fixed, Url, EmailAddress, Concatenation };
-  Type type = Type::Plain;
-  string content;
-  vector<RichText> texts;
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(type, storer);
-    store(content, storer);
-    store(texts, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(type, parser);
-    parse(content, parser);
-    parse(texts, parser);
-  }
-};
-
-class WebPagesManager::PageBlock {
- public:
-  enum class Type : int32 {
-    Title,
-    Subtitle,
-    AuthorDate,
-    Header,
-    Subheader,
-    Paragraph,
-    Preformatted,
-    Footer,
-    Divider,
-    Anchor,
-    List,
-    BlockQuote,
-    PullQuote,
-    Animation,
-    Photo,
-    Video,
-    Cover,
-    Embedded,
-    EmbeddedPost,
-    Collage,
-    Slideshow,
-    ChatLink,
-    Audio
-  };
-
-  virtual Type get_type() const = 0;
-
-  virtual tl_object_ptr<td_api::PageBlock> get_page_block_object() const = 0;
-
-  PageBlock() = default;
-  PageBlock(const PageBlock &) = delete;
-  PageBlock &operator=(const PageBlock &) = delete;
-  PageBlock(PageBlock &&) = delete;
-  PageBlock &operator=(PageBlock &&) = delete;
-  virtual ~PageBlock() = default;
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    Type type = get_type();
-    store(type, storer);
-    call_impl(type, this, [&](const auto *object) { store(*object, storer); });
-  }
-  template <class T>
-  static std::unique_ptr<PageBlock> parse(T &parser) {
-    using ::td::parse;
-    Type type;
-    parse(type, parser);
-    std::unique_ptr<PageBlock> res;
-    call_impl(type, nullptr, [&](const auto *ptr) {
-      using ObjT = std::decay_t<decltype(*ptr)>;
-      auto object = std::make_unique<ObjT>();
-      parse(*object, parser);
-      res = std::move(object);
-    });
-    return res;
-  }
-
- private:
-  template <class F>
-  static void call_impl(Type type, const PageBlock *ptr, F &&f);
-};
-
-template <class T>
-void store(const unique_ptr<WebPagesManager::PageBlock> &block, T &storer) {
-  block->store(storer);
-}
-
-template <class T>
-void parse(unique_ptr<WebPagesManager::PageBlock> &block, T &parser) {
-  block = WebPagesManager::PageBlock::parse(parser);
-}
-
-class WebPagesManager::PageBlockTitle : public PageBlock {
-  RichText title;
-
- public:
-  PageBlockTitle() = default;
-
-  explicit PageBlockTitle(RichText &&title) : title(std::move(title)) {
-  }
-
-  Type get_type() const override {
-    return Type::Title;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockTitle>(get_rich_text_object(title));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(title, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(title, parser);
-  }
-};
-
-class WebPagesManager::PageBlockSubtitle : public PageBlock {
-  RichText subtitle;
-
- public:
-  PageBlockSubtitle() = default;
-  explicit PageBlockSubtitle(RichText &&subtitle) : subtitle(std::move(subtitle)) {
-  }
-
-  Type get_type() const override {
-    return Type::Subtitle;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockSubtitle>(get_rich_text_object(subtitle));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(subtitle, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(subtitle, parser);
-  }
-};
-
-class WebPagesManager::PageBlockAuthorDate : public PageBlock {
-  RichText author;
-  int32 date = 0;
-
- public:
-  PageBlockAuthorDate() = default;
-  PageBlockAuthorDate(RichText &&author, int32 date) : author(std::move(author)), date(max(date, 0)) {
-  }
-
-  Type get_type() const override {
-    return Type::AuthorDate;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockAuthorDate>(get_rich_text_object(author), date);
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(author, storer);
-    store(date, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(author, parser);
-    parse(date, parser);
-  }
-};
-
-class WebPagesManager::PageBlockHeader : public PageBlock {
-  RichText header;
-
- public:
-  PageBlockHeader() = default;
-  explicit PageBlockHeader(RichText &&header) : header(std::move(header)) {
-  }
-
-  Type get_type() const override {
-    return Type::Header;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockHeader>(get_rich_text_object(header));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(header, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(header, parser);
-  }
-};
-
-class WebPagesManager::PageBlockSubheader : public PageBlock {
-  RichText subheader;
-
- public:
-  PageBlockSubheader() = default;
-  explicit PageBlockSubheader(RichText &&subheader) : subheader(std::move(subheader)) {
-  }
-
-  Type get_type() const override {
-    return Type::Subheader;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockSubheader>(get_rich_text_object(subheader));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(subheader, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(subheader, parser);
-  }
-};
-
-class WebPagesManager::PageBlockParagraph : public PageBlock {
-  RichText text;
-
- public:
-  PageBlockParagraph() = default;
-  explicit PageBlockParagraph(RichText &&text) : text(std::move(text)) {
-  }
-
-  Type get_type() const override {
-    return Type::Paragraph;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockParagraph>(get_rich_text_object(text));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(text, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(text, parser);
-  }
-};
-
-class WebPagesManager::PageBlockPreformatted : public PageBlock {
-  RichText text;
-  string language;
-
- public:
-  PageBlockPreformatted() = default;
-  PageBlockPreformatted(RichText &&text, string language) : text(std::move(text)), language(std::move(language)) {
-  }
-
-  Type get_type() const override {
-    return Type::Preformatted;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockPreformatted>(get_rich_text_object(text), language);
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(text, storer);
-    store(language, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(text, parser);
-    parse(language, parser);
-  }
-};
-
-class WebPagesManager::PageBlockFooter : public PageBlock {
-  RichText footer;
-
- public:
-  PageBlockFooter() = default;
-  explicit PageBlockFooter(RichText &&footer) : footer(std::move(footer)) {
-  }
-
-  Type get_type() const override {
-    return Type::Footer;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockFooter>(get_rich_text_object(footer));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(footer, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(footer, parser);
-  }
-};
-
-class WebPagesManager::PageBlockDivider : public PageBlock {
- public:
-  Type get_type() const override {
-    return Type::Divider;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockDivider>();
-  }
-  template <class T>
-  void store(T &storer) const {
-  }
-  template <class T>
-  void parse(T &parser) {
-  }
-};
-
-class WebPagesManager::PageBlockAnchor : public PageBlock {
-  string name;
-
- public:
-  PageBlockAnchor() = default;
-  explicit PageBlockAnchor(string name) : name(std::move(name)) {
-  }
-
-  Type get_type() const override {
-    return Type::Anchor;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockAnchor>(name);
-  }
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(name, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(name, parser);
-  }
-};
-
-class WebPagesManager::PageBlockList : public PageBlock {
-  vector<RichText> items;
-  bool is_ordered = false;
-
- public:
-  PageBlockList() = default;
-  PageBlockList(vector<RichText> &&items, bool is_ordered) : items(std::move(items)), is_ordered(is_ordered) {
-  }
-
-  Type get_type() const override {
-    return Type::List;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockList>(get_rich_text_objects(items), is_ordered);
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-
-    BEGIN_STORE_FLAGS();
-    STORE_FLAG(is_ordered);
-    END_STORE_FLAGS();
-
-    store(items, storer);
-  }
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-
-    BEGIN_PARSE_FLAGS();
-    PARSE_FLAG(is_ordered);
-    END_PARSE_FLAGS();
-
-    parse(items, parser);
-  }
-};
-
-class WebPagesManager::PageBlockBlockQuote : public PageBlock {
-  RichText text;
-  RichText caption;
-
- public:
-  PageBlockBlockQuote() = default;
-  PageBlockBlockQuote(RichText &&text, RichText &&caption) : text(std::move(text)), caption(std::move(caption)) {
-  }
-
-  Type get_type() const override {
-    return Type::BlockQuote;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockBlockQuote>(get_rich_text_object(text), get_rich_text_object(caption));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(text, storer);
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(text, parser);
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockPullQuote : public PageBlock {
-  RichText text;
-  RichText caption;
-
- public:
-  PageBlockPullQuote() = default;
-  PageBlockPullQuote(RichText &&text, RichText &&caption) : text(std::move(text)), caption(std::move(caption)) {
-  }
-
-  Type get_type() const override {
-    return Type::PullQuote;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockPullQuote>(get_rich_text_object(text), get_rich_text_object(caption));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(text, storer);
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(text, parser);
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockAnimation : public PageBlock {
-  FileId animation_file_id;
-  RichText caption;
-  bool need_autoplay = false;
-
- public:
-  PageBlockAnimation() = default;
-  PageBlockAnimation(FileId animation_file_id, RichText &&caption, bool need_autoplay)
-      : animation_file_id(animation_file_id), caption(std::move(caption)), need_autoplay(need_autoplay) {
-  }
-
-  Type get_type() const override {
-    return Type::Animation;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockAnimation>(
-        G()->td().get_actor_unsafe()->animations_manager_->get_animation_object(animation_file_id,
-                                                                                "get_page_block_object"),
-        get_rich_text_object(caption), need_autoplay);
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-
-    bool has_empty_animation = !animation_file_id.is_valid();
-    BEGIN_STORE_FLAGS();
-    STORE_FLAG(need_autoplay);
-    STORE_FLAG(has_empty_animation);
-    END_STORE_FLAGS();
-
-    if (!has_empty_animation) {
-      storer.context()->td().get_actor_unsafe()->animations_manager_->store_animation(animation_file_id, storer);
+    if (is_instant_view_v2) {
+      instant_view.is_v2 = true;
     }
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-
-    bool has_empty_animation;
-    BEGIN_PARSE_FLAGS();
-    PARSE_FLAG(need_autoplay);
-    PARSE_FLAG(has_empty_animation);
-    END_PARSE_FLAGS();
-
-    if (parser.version() >= static_cast<int32>(Version::FixWebPageInstantViewDatabase)) {
-      if (!has_empty_animation) {
-        animation_file_id = parser.context()->td().get_actor_unsafe()->animations_manager_->parse_animation(parser);
-      } else {
-        animation_file_id = FileId();
-      }
-    } else {
-      animation_file_id = FileId();
-      parser.set_error("Wrong stored object");
-    }
-    parse(caption, parser);
   }
 };
-
-class WebPagesManager::PageBlockPhoto : public PageBlock {
-  Photo photo;
-  RichText caption;
-
- public:
-  PageBlockPhoto() = default;
-  PageBlockPhoto(Photo photo, RichText &&caption) : photo(std::move(photo)), caption(std::move(caption)) {
-  }
-
-  Type get_type() const override {
-    return Type::Photo;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockPhoto>(
-        get_photo_object(G()->td().get_actor_unsafe()->file_manager_.get(), &photo), get_rich_text_object(caption));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(photo, storer);
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(photo, parser);
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockVideo : public PageBlock {
-  FileId video_file_id;
-  RichText caption;
-  bool need_autoplay = false;
-  bool is_looped = false;
-
- public:
-  PageBlockVideo() = default;
-  PageBlockVideo(FileId video_file_id, RichText &&caption, bool need_autoplay, bool is_looped)
-      : video_file_id(video_file_id), caption(std::move(caption)), need_autoplay(need_autoplay), is_looped(is_looped) {
-  }
-
-  Type get_type() const override {
-    return Type::Video;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockVideo>(
-        G()->td().get_actor_unsafe()->videos_manager_->get_video_object(video_file_id), get_rich_text_object(caption),
-        need_autoplay, is_looped);
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-
-    bool has_empty_video = !video_file_id.is_valid();
-    BEGIN_STORE_FLAGS();
-    STORE_FLAG(need_autoplay);
-    STORE_FLAG(is_looped);
-    STORE_FLAG(has_empty_video);
-    END_STORE_FLAGS();
-
-    if (!has_empty_video) {
-      storer.context()->td().get_actor_unsafe()->videos_manager_->store_video(video_file_id, storer);
-    }
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-
-    bool has_empty_video;
-    BEGIN_PARSE_FLAGS();
-    PARSE_FLAG(need_autoplay);
-    PARSE_FLAG(is_looped);
-    PARSE_FLAG(has_empty_video);
-    END_PARSE_FLAGS();
-
-    if (parser.version() >= static_cast<int32>(Version::FixWebPageInstantViewDatabase)) {
-      if (!has_empty_video) {
-        video_file_id = parser.context()->td().get_actor_unsafe()->videos_manager_->parse_video(parser);
-      } else {
-        video_file_id = FileId();
-      }
-    } else {
-      video_file_id = FileId();
-      parser.set_error("Wrong stored object");
-    }
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockCover : public PageBlock {
-  unique_ptr<PageBlock> cover;
-
- public:
-  PageBlockCover() = default;
-  explicit PageBlockCover(unique_ptr<PageBlock> &&cover) : cover(std::move(cover)) {
-  }
-
-  Type get_type() const override {
-    return Type::Cover;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockCover>(cover->get_page_block_object());
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(cover, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(cover, parser);
-  }
-};
-
-class WebPagesManager::PageBlockEmbedded : public PageBlock {
-  string url;
-  string html;
-  Photo poster_photo;
-  Dimensions dimensions;
-  RichText caption;
-  bool is_full_width;
-  bool allow_scrolling;
-
- public:
-  PageBlockEmbedded() = default;
-  PageBlockEmbedded(string url, string html, Photo poster_photo, Dimensions dimensions, RichText &&caption,
-                    bool is_full_width, bool allow_scrolling)
-      : url(std::move(url))
-      , html(std::move(html))
-      , poster_photo(std::move(poster_photo))
-      , dimensions(dimensions)
-      , caption(std::move(caption))
-      , is_full_width(is_full_width)
-      , allow_scrolling(allow_scrolling) {
-  }
-
-  Type get_type() const override {
-    return Type::Embedded;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockEmbedded>(
-        url, html, get_photo_object(G()->td().get_actor_unsafe()->file_manager_.get(), &poster_photo), dimensions.width,
-        dimensions.height, get_rich_text_object(caption), is_full_width, allow_scrolling);
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    BEGIN_STORE_FLAGS();
-    STORE_FLAG(is_full_width);
-    STORE_FLAG(allow_scrolling);
-    END_STORE_FLAGS();
-
-    store(url, storer);
-    store(html, storer);
-    store(poster_photo, storer);
-    store(dimensions, storer);
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    BEGIN_PARSE_FLAGS();
-    PARSE_FLAG(is_full_width);
-    PARSE_FLAG(allow_scrolling);
-    END_PARSE_FLAGS();
-
-    parse(url, parser);
-    parse(html, parser);
-    parse(poster_photo, parser);
-    parse(dimensions, parser);
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockEmbeddedPost : public PageBlock {
-  string url;
-  string author;
-  Photo author_photo;
-  int32 date;
-  vector<unique_ptr<PageBlock>> page_blocks;
-  RichText caption;
-
- public:
-  PageBlockEmbeddedPost() = default;
-  PageBlockEmbeddedPost(string url, string author, Photo author_photo, int32 date,
-                        vector<unique_ptr<PageBlock>> &&page_blocks, RichText &&caption)
-      : url(std::move(url))
-      , author(std::move(author))
-      , author_photo(std::move(author_photo))
-      , date(max(date, 0))
-      , page_blocks(std::move(page_blocks))
-      , caption(std::move(caption)) {
-  }
-
-  Type get_type() const override {
-    return Type::EmbeddedPost;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockEmbeddedPost>(
-        url, author, get_photo_object(G()->td().get_actor_unsafe()->file_manager_.get(), &author_photo), date,
-        get_page_block_objects(page_blocks), get_rich_text_object(caption));
-  }
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(url, storer);
-    store(author, storer);
-    store(author_photo, storer);
-    store(date, storer);
-    store(page_blocks, storer);
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(url, parser);
-    parse(author, parser);
-    parse(author_photo, parser);
-    parse(date, parser);
-    parse(page_blocks, parser);
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockCollage : public PageBlock {
-  vector<unique_ptr<PageBlock>> page_blocks;
-  RichText caption;
-
- public:
-  PageBlockCollage() = default;
-  PageBlockCollage(vector<unique_ptr<PageBlock>> &&page_blocks, RichText &&caption)
-      : page_blocks(std::move(page_blocks)), caption(std::move(caption)) {
-  }
-
-  Type get_type() const override {
-    return Type::Collage;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockCollage>(get_page_block_objects(page_blocks), get_rich_text_object(caption));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(page_blocks, storer);
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(page_blocks, parser);
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockSlideshow : public PageBlock {
-  vector<unique_ptr<PageBlock>> page_blocks;
-  RichText caption;
-
- public:
-  PageBlockSlideshow() = default;
-  PageBlockSlideshow(vector<unique_ptr<PageBlock>> &&page_blocks, RichText &&caption)
-      : page_blocks(std::move(page_blocks)), caption(std::move(caption)) {
-  }
-
-  Type get_type() const override {
-    return Type::Slideshow;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockSlideshow>(get_page_block_objects(page_blocks),
-                                                      get_rich_text_object(caption));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(page_blocks, storer);
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(page_blocks, parser);
-    parse(caption, parser);
-  }
-};
-
-class WebPagesManager::PageBlockChatLink : public PageBlock {
-  string title;
-  DialogPhoto photo;
-  string username;
-
- public:
-  PageBlockChatLink() = default;
-  PageBlockChatLink(string title, DialogPhoto photo, string username)
-      : title(std::move(title)), photo(std::move(photo)), username(std::move(username)) {
-  }
-
-  Type get_type() const override {
-    return Type::ChatLink;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockChatLink>(
-        title, get_chat_photo_object(G()->td().get_actor_unsafe()->file_manager_.get(), &photo), username);
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-    store(title, storer);
-    store(photo, storer);
-    store(username, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-    parse(title, parser);
-    parse(photo, parser);
-    parse(username, parser);
-  }
-};
-
-class WebPagesManager::PageBlockAudio : public PageBlock {
-  FileId audio_file_id;
-  RichText caption;
-
- public:
-  PageBlockAudio() = default;
-  PageBlockAudio(FileId audio_file_id, RichText &&caption) : audio_file_id(audio_file_id), caption(std::move(caption)) {
-  }
-
-  Type get_type() const override {
-    return Type::Audio;
-  }
-
-  tl_object_ptr<td_api::PageBlock> get_page_block_object() const override {
-    return make_tl_object<td_api::pageBlockAudio>(
-        G()->td().get_actor_unsafe()->audios_manager_->get_audio_object(audio_file_id), get_rich_text_object(caption));
-  }
-
-  template <class T>
-  void store(T &storer) const {
-    using ::td::store;
-
-    bool has_empty_audio = !audio_file_id.is_valid();
-    BEGIN_STORE_FLAGS();
-    STORE_FLAG(has_empty_audio);
-    END_STORE_FLAGS();
-
-    if (!has_empty_audio) {
-      storer.context()->td().get_actor_unsafe()->audios_manager_->store_audio(audio_file_id, storer);
-    }
-    store(caption, storer);
-  }
-
-  template <class T>
-  void parse(T &parser) {
-    using ::td::parse;
-
-    bool has_empty_audio;
-    if (parser.version() >= static_cast<int32>(Version::FixPageBlockAudioEmptyFile)) {
-      BEGIN_PARSE_FLAGS();
-      PARSE_FLAG(has_empty_audio);
-      END_PARSE_FLAGS();
-    } else {
-      has_empty_audio = false;
-    }
-
-    if (!has_empty_audio) {
-      audio_file_id = parser.context()->td().get_actor_unsafe()->audios_manager_->parse_audio(parser);
-    } else {
-      audio_file_id = FileId();
-    }
-    parse(caption, parser);
-  }
-};
-
-template <class F>
-void WebPagesManager::PageBlock::call_impl(Type type, const PageBlock *ptr, F &&f) {
-  switch (type) {
-    case Type::Title:
-      return f(static_cast<const WebPagesManager::PageBlockTitle *>(ptr));
-    case Type::Subtitle:
-      return f(static_cast<const WebPagesManager::PageBlockSubtitle *>(ptr));
-    case Type::AuthorDate:
-      return f(static_cast<const WebPagesManager::PageBlockAuthorDate *>(ptr));
-    case Type::Header:
-      return f(static_cast<const WebPagesManager::PageBlockHeader *>(ptr));
-    case Type::Subheader:
-      return f(static_cast<const WebPagesManager::PageBlockSubheader *>(ptr));
-    case Type::Paragraph:
-      return f(static_cast<const WebPagesManager::PageBlockParagraph *>(ptr));
-    case Type::Preformatted:
-      return f(static_cast<const WebPagesManager::PageBlockPreformatted *>(ptr));
-    case Type::Footer:
-      return f(static_cast<const WebPagesManager::PageBlockFooter *>(ptr));
-    case Type::Divider:
-      return f(static_cast<const WebPagesManager::PageBlockDivider *>(ptr));
-    case Type::Anchor:
-      return f(static_cast<const WebPagesManager::PageBlockAnchor *>(ptr));
-    case Type::List:
-      return f(static_cast<const WebPagesManager::PageBlockList *>(ptr));
-    case Type::BlockQuote:
-      return f(static_cast<const WebPagesManager::PageBlockBlockQuote *>(ptr));
-    case Type::PullQuote:
-      return f(static_cast<const WebPagesManager::PageBlockPullQuote *>(ptr));
-    case Type::Animation:
-      return f(static_cast<const WebPagesManager::PageBlockAnimation *>(ptr));
-    case Type::Photo:
-      return f(static_cast<const WebPagesManager::PageBlockPhoto *>(ptr));
-    case Type::Video:
-      return f(static_cast<const WebPagesManager::PageBlockVideo *>(ptr));
-    case Type::Cover:
-      return f(static_cast<const WebPagesManager::PageBlockCover *>(ptr));
-    case Type::Embedded:
-      return f(static_cast<const WebPagesManager::PageBlockEmbedded *>(ptr));
-    case Type::EmbeddedPost:
-      return f(static_cast<const WebPagesManager::PageBlockEmbeddedPost *>(ptr));
-    case Type::Collage:
-      return f(static_cast<const WebPagesManager::PageBlockCollage *>(ptr));
-    case Type::Slideshow:
-      return f(static_cast<const WebPagesManager::PageBlockSlideshow *>(ptr));
-    case Type::ChatLink:
-      return f(static_cast<const WebPagesManager::PageBlockChatLink *>(ptr));
-    case Type::Audio:
-      return f(static_cast<const WebPagesManager::PageBlockAudio *>(ptr));
-  }
-  UNREACHABLE();
-}
 
 WebPagesManager::WebPagesManager(Td *td, ActorShared<> parent) : td_(td), parent_(std::move(parent)) {
   pending_web_pages_timeout_.set_callback(on_pending_web_page_timeout_callback);
@@ -1409,12 +377,16 @@ WebPageId WebPagesManager::on_get_web_page(tl_object_ptr<telegram_api::WebPage> 
       }
 
       LOG(INFO) << "Got empty " << web_page_id;
-      auto web_page_to_delete = get_web_page(web_page_id);
+      const WebPage *web_page_to_delete = get_web_page(web_page_id);
       if (web_page_to_delete != nullptr) {
         if (web_page_to_delete->logevent_id != 0) {
           LOG(INFO) << "Erase " << web_page_id << " from binlog";
           binlog_erase(G()->td_db()->get_binlog(), web_page_to_delete->logevent_id);
           web_page_to_delete->logevent_id = 0;
+        }
+        if (web_page_to_delete->file_source_id.is_valid()) {
+          td_->file_manager_->change_files_source(web_page_to_delete->file_source_id,
+                                                  get_web_page_file_ids(web_page_to_delete), vector<FileId>());
         }
         web_pages_.erase(web_page_id);
       }
@@ -1497,8 +469,7 @@ WebPageId WebPagesManager::on_get_web_page(tl_object_ptr<telegram_api::WebPage> 
         if (document_id == telegram_api::document::ID) {
           auto parsed_document = td_->documents_manager_->on_get_document(
               move_tl_object_as<telegram_api::document>(web_page->document_), owner_dialog_id);
-          page->document_type = parsed_document.first;
-          page->document_file_id = parsed_document.second;
+          page->document = parsed_document;
         }
       }
       if (web_page->flags_ & WEBPAGE_FLAG_HAS_INSTANT_VIEW) {
@@ -1524,14 +495,27 @@ void WebPagesManager::update_web_page(unique_ptr<WebPage> web_page, WebPageId we
   CHECK(web_page != nullptr);
 
   auto &page = web_pages_[web_page_id];
+  auto old_file_ids = get_web_page_file_ids(page.get());
   WebPageInstantView old_instant_view;
   if (page != nullptr) {
     old_instant_view = std::move(page->instant_view);
     web_page->logevent_id = page->logevent_id;
+  } else {
+    auto it = url_to_file_source_id_.find(web_page->url);
+    if (it != url_to_file_source_id_.end()) {
+      VLOG(file_references) << "Move " << it->second << " inside of " << web_page_id;
+      web_page->file_source_id = it->second;
+      url_to_file_source_id_.erase(it);
+    }
   }
   page = std::move(web_page);
 
   update_web_page_instant_view(web_page_id, page->instant_view, std::move(old_instant_view));
+
+  auto new_file_ids = get_web_page_file_ids(page.get());
+  if (old_file_ids != new_file_ids) {
+    td_->file_manager_->change_files_source(get_web_page_file_source_id(page.get()), old_file_ids, new_file_ids);
+  }
 
   on_get_web_page_by_url(page->url, web_page_id, from_database);
 
@@ -1544,8 +528,22 @@ void WebPagesManager::update_web_page(unique_ptr<WebPage> web_page, WebPageId we
 
 void WebPagesManager::update_web_page_instant_view(WebPageId web_page_id, WebPageInstantView &new_instant_view,
                                                    WebPageInstantView &&old_instant_view) {
+  LOG(INFO) << "Merge new " << new_instant_view << " and old " << old_instant_view;
+
   bool new_from_database = new_instant_view.was_loaded_from_database;
   bool old_from_database = old_instant_view.was_loaded_from_database;
+
+  if (new_instant_view.is_empty && !new_from_database) {
+    // new_instant_view is from server and is empty, need to delete the instant view
+    if (G()->parameters().use_message_db && (!old_instant_view.is_empty || !old_from_database)) {
+      // we have no instant view and probably want it to be deleted from database
+      LOG(INFO) << "Erase instant view of " << web_page_id << " from database";
+      new_instant_view.was_loaded_from_database = true;
+      G()->td_db()->get_sqlite_pmc()->erase(get_web_page_instant_view_database_key(web_page_id), Auto());
+    }
+    return;
+  }
+
   if (need_use_old_instant_view(new_instant_view, old_instant_view)) {
     new_instant_view = std::move(old_instant_view);
   }
@@ -1587,7 +585,6 @@ void WebPagesManager::update_web_page_instant_view(WebPageId web_page_id, WebPag
 
 bool WebPagesManager::need_use_old_instant_view(const WebPageInstantView &new_instant_view,
                                                 const WebPageInstantView &old_instant_view) {
-  LOG(INFO) << "Merge " << new_instant_view << " and " << old_instant_view;
   if (old_instant_view.is_empty || !old_instant_view.is_loaded) {
     return false;
   }
@@ -1688,7 +685,7 @@ int64 WebPagesManager::get_web_page_preview(td_api::object_ptr<td_api::formatted
     return 0;
   }
 
-  auto r_entities = get_message_entities(td_->contacts_manager_.get(), text->entities_);
+  auto r_entities = get_message_entities(td_->contacts_manager_.get(), std::move(text->entities_));
   if (r_entities.is_error()) {
     promise.set_error(r_entities.move_as_error());
     return 0;
@@ -1754,7 +751,7 @@ WebPageId WebPagesManager::get_web_page_instant_view(const string &url, bool for
 WebPageId WebPagesManager::get_web_page_instant_view(WebPageId web_page_id, bool force_full, Promise<Unit> &&promise) {
   LOG(INFO) << "Trying to get web page instant view for " << web_page_id;
 
-  auto web_page_instant_view = get_web_page_instant_view(web_page_id);
+  const WebPageInstantView *web_page_instant_view = get_web_page_instant_view(web_page_id);
   if (web_page_instant_view == nullptr) {
     promise.set_value(Unit());
     return WebPageId();
@@ -1806,7 +803,7 @@ void WebPagesManager::load_web_page_instant_view(WebPageId web_page_id, bool for
 
 void WebPagesManager::reload_web_page_instant_view(WebPageId web_page_id) {
   LOG(INFO) << "Reload " << web_page_id << " instant view";
-  auto web_page = get_web_page(web_page_id);
+  const WebPage *web_page = get_web_page(web_page_id);
   CHECK(web_page != nullptr && !web_page->instant_view.is_empty);
 
   auto promise = PromiseCreator::lambda([web_page_id](Result<> result) {
@@ -1824,8 +821,8 @@ void WebPagesManager::on_load_web_page_instant_view_from_database(WebPageId web_
   //  G()->td_db()->get_sqlite_pmc()->erase(get_web_page_instant_view_database_key(web_page_id), Auto());
   //  return;
 
-  auto web_page_instant_view = get_web_page_instant_view(web_page_id);
-  if (web_page_instant_view == nullptr) {
+  auto web_page_it = web_pages_.find(web_page_id);
+  if (web_page_it == web_pages_.end() || web_page_it->second->instant_view.is_empty) {
     // possible if web page loses preview/instant view
     LOG(WARNING) << "There is no instant view in " << web_page_id;
     if (!value.empty()) {
@@ -1834,7 +831,9 @@ void WebPagesManager::on_load_web_page_instant_view_from_database(WebPageId web_
     update_web_page_instant_view_load_requests(web_page_id, true, Unit());
     return;
   }
-  if (web_page_instant_view->was_loaded_from_database) {
+  WebPage *web_page = web_page_it->second.get();
+  auto &web_page_instant_view = web_page->instant_view;
+  if (web_page_instant_view.was_loaded_from_database) {
     return;
   }
 
@@ -1843,13 +842,20 @@ void WebPagesManager::on_load_web_page_instant_view_from_database(WebPageId web_
     if (log_event_parse(result, value).is_error()) {
       result = WebPageInstantView();
 
-      LOG(INFO) << "Erase instant view in " << web_page_id << " from database";
+      LOG(ERROR) << "Erase instant view in " << web_page_id << " from database";
       G()->td_db()->get_sqlite_pmc()->erase(get_web_page_instant_view_database_key(web_page_id), Auto());
     }
   }
   result.was_loaded_from_database = true;
 
-  update_web_page_instant_view(web_page_id, *web_page_instant_view, std::move(result));
+  auto old_file_ids = get_web_page_file_ids(web_page);
+
+  update_web_page_instant_view(web_page_id, web_page_instant_view, std::move(result));
+
+  auto new_file_ids = get_web_page_file_ids(web_page);
+  if (old_file_ids != new_file_ids) {
+    td_->file_manager_->change_files_source(get_web_page_file_source_id(web_page), old_file_ids, new_file_ids);
+  }
 
   update_web_page_instant_view_load_requests(web_page_id, false, Unit());
 }
@@ -1871,7 +877,7 @@ void WebPagesManager::update_web_page_instant_view_load_requests(WebPageId web_p
 
   if (result.is_error()) {
     LOG(INFO) << "Receive error " << result.error() << " for load " << web_page_id;
-    append(promises[0], std::move(promises[1]));
+    combine(promises[0], std::move(promises[1]));
     for (auto &promise : promises[0]) {
       promise.set_error(result.error().clone());
     }
@@ -1879,9 +885,9 @@ void WebPagesManager::update_web_page_instant_view_load_requests(WebPageId web_p
   }
   LOG(INFO) << "Successfully loaded web page " << web_page_id;
 
-  auto web_page_instant_view = get_web_page_instant_view(web_page_id);
+  const WebPageInstantView *web_page_instant_view = get_web_page_instant_view(web_page_id);
   if (web_page_instant_view == nullptr) {
-    append(promises[0], std::move(promises[1]));
+    combine(promises[0], std::move(promises[1]));
     for (auto &promise : promises[0]) {
       promise.set_value(Unit());
     }
@@ -1889,20 +895,19 @@ void WebPagesManager::update_web_page_instant_view_load_requests(WebPageId web_p
   }
   if (web_page_instant_view->is_loaded) {
     if (web_page_instant_view->is_full) {
-      append(promises[0], std::move(promises[1]));
-      promises[1].clear();
+      combine(promises[0], std::move(promises[1]));
     }
 
     for (auto &promise : promises[0]) {
       promise.set_value(Unit());
     }
-    promises[0].clear();
+    reset_to_empty(promises[0]);
   }
   if (!promises[0].empty() || !promises[1].empty()) {
     if (force_update) {
       // protection from cycles
       LOG(ERROR) << "Expected to receive " << web_page_id << " from the server, but didn't receive it";
-      append(promises[0], std::move(promises[1]));
+      combine(promises[0], std::move(promises[1]));
       for (auto &promise : promises[0]) {
         promise.set_value(Unit());
       }
@@ -1910,8 +915,8 @@ void WebPagesManager::update_web_page_instant_view_load_requests(WebPageId web_p
     }
     auto &load_queries = load_web_page_instant_view_queries_[web_page_id];
     auto old_size = load_queries.partial.size() + load_queries.full.size();
-    append(load_queries.partial, std::move(promises[0]));
-    append(load_queries.full, std::move(promises[1]));
+    combine(load_queries.partial, std::move(promises[0]));
+    combine(load_queries.full, std::move(promises[1]));
     if (old_size == 0) {
       reload_web_page_instant_view(web_page_id);
     }
@@ -2006,7 +1011,7 @@ void WebPagesManager::on_load_web_page_by_url_from_database(WebPageId web_page_i
     return;
   }
 
-  auto web_page = get_web_page(web_page_id);
+  const WebPage *web_page = get_web_page(web_page_id);
   if (web_page == nullptr) {
     reload_web_page_by_url(url, std::move(promise));
     return;
@@ -2029,7 +1034,7 @@ SecretInputMedia WebPagesManager::get_secret_input_media(WebPageId web_page_id) 
     return SecretInputMedia{};
   }
 
-  auto web_page = get_web_page(web_page_id);
+  const WebPage *web_page = get_web_page(web_page_id);
   if (web_page == nullptr) {
     return SecretInputMedia{};
   }
@@ -2047,36 +1052,45 @@ tl_object_ptr<td_api::webPage> WebPagesManager::get_web_page_object(WebPageId we
   if (!web_page_id.is_valid()) {
     return nullptr;
   }
-  auto web_page = get_web_page(web_page_id);
+  const WebPage *web_page = get_web_page(web_page_id);
   if (web_page == nullptr) {
     return nullptr;
   }
+  int32 instant_view_version = [web_page] {
+    if (web_page->instant_view.is_empty) {
+      return 0;
+    }
+    if (web_page->instant_view.is_v2) {
+      return 2;
+    }
+    return 1;
+  }();
   return make_tl_object<td_api::webPage>(
       web_page->url, web_page->display_url, web_page->type, web_page->site_name, web_page->title, web_page->description,
       get_photo_object(td_->file_manager_.get(), &web_page->photo), web_page->embed_url, web_page->embed_type,
       web_page->embed_dimensions.width, web_page->embed_dimensions.height, web_page->duration, web_page->author,
-      web_page->document_type == DocumentsManager::DocumentType::Animation
-          ? td_->animations_manager_->get_animation_object(web_page->document_file_id, "get_web_page_object")
+      web_page->document.type == Document::Type::Animation
+          ? td_->animations_manager_->get_animation_object(web_page->document.file_id, "get_web_page_object")
           : nullptr,
-      web_page->document_type == DocumentsManager::DocumentType::Audio
-          ? td_->audios_manager_->get_audio_object(web_page->document_file_id)
+      web_page->document.type == Document::Type::Audio
+          ? td_->audios_manager_->get_audio_object(web_page->document.file_id)
           : nullptr,
-      web_page->document_type == DocumentsManager::DocumentType::General
-          ? td_->documents_manager_->get_document_object(web_page->document_file_id)
+      web_page->document.type == Document::Type::General
+          ? td_->documents_manager_->get_document_object(web_page->document.file_id)
           : nullptr,
-      web_page->document_type == DocumentsManager::DocumentType::Sticker
-          ? td_->stickers_manager_->get_sticker_object(web_page->document_file_id)
+      web_page->document.type == Document::Type::Sticker
+          ? td_->stickers_manager_->get_sticker_object(web_page->document.file_id)
           : nullptr,
-      web_page->document_type == DocumentsManager::DocumentType::Video
-          ? td_->videos_manager_->get_video_object(web_page->document_file_id)
+      web_page->document.type == Document::Type::Video
+          ? td_->videos_manager_->get_video_object(web_page->document.file_id)
           : nullptr,
-      web_page->document_type == DocumentsManager::DocumentType::VideoNote
-          ? td_->video_notes_manager_->get_video_note_object(web_page->document_file_id)
+      web_page->document.type == Document::Type::VideoNote
+          ? td_->video_notes_manager_->get_video_note_object(web_page->document.file_id)
           : nullptr,
-      web_page->document_type == DocumentsManager::DocumentType::VoiceNote
-          ? td_->voice_notes_manager_->get_voice_note_object(web_page->document_file_id)
+      web_page->document.type == Document::Type::VoiceNote
+          ? td_->voice_notes_manager_->get_voice_note_object(web_page->document.file_id)
           : nullptr,
-      !web_page->instant_view.is_empty);
+      instant_view_version);
 }
 
 tl_object_ptr<td_api::webPageInstantView> WebPagesManager::get_web_page_instant_view_object(
@@ -2093,10 +1107,9 @@ tl_object_ptr<td_api::webPageInstantView> WebPagesManager::get_web_page_instant_
     LOG(ERROR) << "Trying to get not loaded web page instant view";
     return nullptr;
   }
-  return make_tl_object<td_api::webPageInstantView>(
-      transform(web_page_instant_view->page_blocks,
-                [](const auto &page_block) { return page_block->get_page_block_object(); }),
-      web_page_instant_view->is_full);
+  return make_tl_object<td_api::webPageInstantView>(get_page_block_objects(web_page_instant_view->page_blocks),
+                                                    web_page_instant_view->is_v2 ? 2 : 1, web_page_instant_view->url,
+                                                    web_page_instant_view->is_rtl, web_page_instant_view->is_full);
 }
 
 void WebPagesManager::update_messages_content(WebPageId web_page_id, bool have_web_page) {
@@ -2122,15 +1135,6 @@ void WebPagesManager::update_messages_content(WebPageId web_page_id, bool have_w
   pending_web_pages_timeout_.cancel_timeout(web_page_id.get());
 }
 
-WebPagesManager::WebPage *WebPagesManager::get_web_page(WebPageId web_page_id) {
-  auto p = web_pages_.find(web_page_id);
-  if (p == web_pages_.end()) {
-    return nullptr;
-  } else {
-    return p->second.get();
-  }
-}
-
 const WebPagesManager::WebPage *WebPagesManager::get_web_page(WebPageId web_page_id) const {
   auto p = web_pages_.find(web_page_id);
   if (p == web_pages_.end()) {
@@ -2140,16 +1144,8 @@ const WebPagesManager::WebPage *WebPagesManager::get_web_page(WebPageId web_page
   }
 }
 
-WebPagesManager::WebPageInstantView *WebPagesManager::get_web_page_instant_view(WebPageId web_page_id) {
-  auto web_page = get_web_page(web_page_id);
-  if (web_page == nullptr || web_page->instant_view.is_empty) {
-    return nullptr;
-  }
-  return &web_page->instant_view;
-}
-
 const WebPagesManager::WebPageInstantView *WebPagesManager::get_web_page_instant_view(WebPageId web_page_id) const {
-  auto web_page = get_web_page(web_page_id);
+  const WebPage *web_page = get_web_page(web_page_id);
   if (web_page == nullptr || web_page->instant_view.is_empty) {
     return nullptr;
   }
@@ -2187,352 +1183,11 @@ void WebPagesManager::on_pending_web_page_timeout(WebPageId web_page_id) {
   }
 }
 
-WebPagesManager::RichText WebPagesManager::get_rich_text(tl_object_ptr<telegram_api::RichText> &&rich_text_ptr) {
-  CHECK(rich_text_ptr != nullptr);
-
-  RichText result;
-  switch (rich_text_ptr->get_id()) {
-    case telegram_api::textEmpty::ID:
-      break;
-    case telegram_api::textPlain::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textPlain>(rich_text_ptr);
-      result.content = std::move(rich_text->text_);
-      break;
-    }
-    case telegram_api::textBold::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textBold>(rich_text_ptr);
-      result.type = RichText::Type::Bold;
-      result.texts.push_back(get_rich_text(std::move(rich_text->text_)));
-      break;
-    }
-    case telegram_api::textItalic::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textItalic>(rich_text_ptr);
-      result.type = RichText::Type::Italic;
-      result.texts.push_back(get_rich_text(std::move(rich_text->text_)));
-      break;
-    }
-    case telegram_api::textUnderline::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textUnderline>(rich_text_ptr);
-      result.type = RichText::Type::Underline;
-      result.texts.push_back(get_rich_text(std::move(rich_text->text_)));
-      break;
-    }
-    case telegram_api::textStrike::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textStrike>(rich_text_ptr);
-      result.type = RichText::Type::Strikethrough;
-      result.texts.push_back(get_rich_text(std::move(rich_text->text_)));
-      break;
-    }
-    case telegram_api::textFixed::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textFixed>(rich_text_ptr);
-      result.type = RichText::Type::Fixed;
-      result.texts.push_back(get_rich_text(std::move(rich_text->text_)));
-      break;
-    }
-    case telegram_api::textUrl::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textUrl>(rich_text_ptr);
-      result.type = RichText::Type::Url;
-      result.content = std::move(rich_text->url_);
-      result.texts.push_back(get_rich_text(std::move(rich_text->text_)));
-      break;
-    }
-    case telegram_api::textEmail::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textEmail>(rich_text_ptr);
-      result.type = RichText::Type::EmailAddress;
-      result.content = std::move(rich_text->email_);
-      result.texts.push_back(get_rich_text(std::move(rich_text->text_)));
-      break;
-    }
-    case telegram_api::textConcat::ID: {
-      auto rich_text = move_tl_object_as<telegram_api::textConcat>(rich_text_ptr);
-      result.type = RichText::Type::Concatenation;
-      result.texts.reserve(rich_text->texts_.size());
-      for (auto &text : rich_text->texts_) {
-        result.texts.push_back(get_rich_text(std::move(text)));
-      }
-      break;
-    }
-    default:
-      UNREACHABLE();
-  }
-  return result;
-}
-
-vector<WebPagesManager::RichText> WebPagesManager::get_rich_texts(
-    vector<tl_object_ptr<telegram_api::RichText>> &&rich_text_ptrs) {
-  vector<RichText> result;
-  result.reserve(rich_text_ptrs.size());
-  for (auto &rich_text : rich_text_ptrs) {
-    result.push_back(get_rich_text(std::move(rich_text)));
-  }
-  return result;
-}
-
-tl_object_ptr<td_api::RichText> WebPagesManager::get_rich_text_object(const RichText &rich_text) {
-  switch (rich_text.type) {
-    case RichText::Type::Plain:
-      return make_tl_object<td_api::richTextPlain>(rich_text.content);
-    case RichText::Type::Bold:
-      return make_tl_object<td_api::richTextBold>(get_rich_text_object(rich_text.texts[0]));
-    case RichText::Type::Italic:
-      return make_tl_object<td_api::richTextItalic>(get_rich_text_object(rich_text.texts[0]));
-    case RichText::Type::Underline:
-      return make_tl_object<td_api::richTextUnderline>(get_rich_text_object(rich_text.texts[0]));
-    case RichText::Type::Strikethrough:
-      return make_tl_object<td_api::richTextStrikethrough>(get_rich_text_object(rich_text.texts[0]));
-    case RichText::Type::Fixed:
-      return make_tl_object<td_api::richTextFixed>(get_rich_text_object(rich_text.texts[0]));
-    case RichText::Type::Url:
-      return make_tl_object<td_api::richTextUrl>(get_rich_text_object(rich_text.texts[0]), rich_text.content);
-    case RichText::Type::EmailAddress:
-      return make_tl_object<td_api::richTextEmailAddress>(get_rich_text_object(rich_text.texts[0]), rich_text.content);
-    case RichText::Type::Concatenation: {
-      vector<tl_object_ptr<td_api::RichText>> texts;
-      texts.reserve(rich_text.texts.size());
-      for (auto &text : rich_text.texts) {
-        texts.push_back(get_rich_text_object(text));
-      }
-      return make_tl_object<td_api::richTexts>(std::move(texts));
-    }
-  }
-  UNREACHABLE();
-  return nullptr;
-}
-
-vector<tl_object_ptr<td_api::RichText>> WebPagesManager::get_rich_text_objects(const vector<RichText> &rich_texts) {
-  vector<tl_object_ptr<td_api::RichText>> result;
-  result.reserve(rich_texts.size());
-  for (auto &rich_text : rich_texts) {
-    result.push_back(get_rich_text_object(rich_text));
-  }
-  return result;
-}
-
-vector<tl_object_ptr<td_api::PageBlock>> WebPagesManager::get_page_block_objects(
-    const vector<unique_ptr<PageBlock>> &page_blocks) {
-  vector<tl_object_ptr<td_api::PageBlock>> result;
-  result.reserve(page_blocks.size());
-  for (auto &page_block : page_blocks) {
-    result.push_back(page_block->get_page_block_object());
-  }
-  return result;
-}
-
-unique_ptr<WebPagesManager::PageBlock> WebPagesManager::get_page_block(
-    tl_object_ptr<telegram_api::PageBlock> page_block_ptr, const std::unordered_map<int64, FileId> &animations,
-    const std::unordered_map<int64, FileId> &audios, const std::unordered_map<int64, Photo> &photos,
-    const std::unordered_map<int64, FileId> &videos) const {
-  CHECK(page_block_ptr != nullptr);
-  switch (page_block_ptr->get_id()) {
-    case telegram_api::pageBlockUnsupported::ID:
-      return nullptr;
-    case telegram_api::pageBlockTitle::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockTitle>(page_block_ptr);
-      return make_unique<PageBlockTitle>(get_rich_text(std::move(page_block->text_)));
-    }
-    case telegram_api::pageBlockSubtitle::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockSubtitle>(page_block_ptr);
-      return make_unique<PageBlockSubtitle>(get_rich_text(std::move(page_block->text_)));
-    }
-    case telegram_api::pageBlockAuthorDate::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockAuthorDate>(page_block_ptr);
-      return make_unique<PageBlockAuthorDate>(get_rich_text(std::move(page_block->author_)),
-                                              page_block->published_date_);
-    }
-    case telegram_api::pageBlockHeader::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockHeader>(page_block_ptr);
-      return make_unique<PageBlockHeader>(get_rich_text(std::move(page_block->text_)));
-    }
-    case telegram_api::pageBlockSubheader::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockSubheader>(page_block_ptr);
-      return make_unique<PageBlockSubheader>(get_rich_text(std::move(page_block->text_)));
-    }
-    case telegram_api::pageBlockParagraph::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockParagraph>(page_block_ptr);
-      return make_unique<PageBlockParagraph>(get_rich_text(std::move(page_block->text_)));
-    }
-    case telegram_api::pageBlockPreformatted::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockPreformatted>(page_block_ptr);
-      return make_unique<PageBlockPreformatted>(get_rich_text(std::move(page_block->text_)),
-                                                std::move(page_block->language_));
-    }
-    case telegram_api::pageBlockFooter::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockFooter>(page_block_ptr);
-      return make_unique<PageBlockFooter>(get_rich_text(std::move(page_block->text_)));
-    }
-    case telegram_api::pageBlockDivider::ID:
-      return make_unique<PageBlockDivider>();
-    case telegram_api::pageBlockAnchor::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockAnchor>(page_block_ptr);
-      return make_unique<PageBlockAnchor>(std::move(page_block->name_));
-    }
-    case telegram_api::pageBlockList::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockList>(page_block_ptr);
-      return make_unique<PageBlockList>(get_rich_texts(std::move(page_block->items_)), page_block->ordered_);
-    }
-    case telegram_api::pageBlockBlockquote::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockBlockquote>(page_block_ptr);
-      return make_unique<PageBlockBlockQuote>(get_rich_text(std::move(page_block->text_)),
-                                              get_rich_text(std::move(page_block->caption_)));
-    }
-    case telegram_api::pageBlockPullquote::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockPullquote>(page_block_ptr);
-      return make_unique<PageBlockPullQuote>(get_rich_text(std::move(page_block->text_)),
-                                             get_rich_text(std::move(page_block->caption_)));
-    }
-    case telegram_api::pageBlockPhoto::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockPhoto>(page_block_ptr);
-      auto it = photos.find(page_block->photo_id_);
-      Photo photo;
-      if (it == photos.end()) {
-        photo.id = -2;
-      } else {
-        photo = it->second;
-      }
-      return make_unique<PageBlockPhoto>(std::move(photo), get_rich_text(std::move(page_block->caption_)));
-    }
-    case telegram_api::pageBlockVideo::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockVideo>(page_block_ptr);
-      bool need_autoplay = (page_block->flags_ & telegram_api::pageBlockVideo::AUTOPLAY_MASK) != 0;
-      bool is_looped = (page_block->flags_ & telegram_api::pageBlockVideo::LOOP_MASK) != 0;
-      auto animations_it = animations.find(page_block->video_id_);
-      if (animations_it != animations.end()) {
-        LOG_IF(ERROR, !is_looped) << "Receive non-looped animation";
-        return make_unique<PageBlockAnimation>(animations_it->second, get_rich_text(std::move(page_block->caption_)),
-                                               need_autoplay);
-      }
-
-      auto it = videos.find(page_block->video_id_);
-      FileId video_file_id;
-      if (it != videos.end()) {
-        video_file_id = it->second;
-      }
-      return make_unique<PageBlockVideo>(video_file_id, get_rich_text(std::move(page_block->caption_)), need_autoplay,
-                                         is_looped);
-    }
-    case telegram_api::pageBlockCover::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockCover>(page_block_ptr);
-      auto cover = get_page_block(std::move(page_block->cover_), animations, audios, photos, videos);
-      if (cover == nullptr) {
-        return nullptr;
-      }
-      return make_unique<PageBlockCover>(std::move(cover));
-    }
-    case telegram_api::pageBlockEmbed::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockEmbed>(page_block_ptr);
-      bool is_full_width = (page_block->flags_ & telegram_api::pageBlockEmbed::FULL_WIDTH_MASK) != 0;
-      bool allow_scrolling = (page_block->flags_ & telegram_api::pageBlockEmbed::ALLOW_SCROLLING_MASK) != 0;
-      auto it = (page_block->flags_ & telegram_api::pageBlockEmbed::POSTER_PHOTO_ID_MASK) != 0
-                    ? photos.find(page_block->poster_photo_id_)
-                    : photos.end();
-      Photo poster_photo;
-      if (it == photos.end()) {
-        poster_photo.id = -2;
-      } else {
-        poster_photo = it->second;
-      }
-      return make_unique<PageBlockEmbedded>(std::move(page_block->url_), std::move(page_block->html_),
-                                            std::move(poster_photo), get_dimensions(page_block->w_, page_block->h_),
-                                            get_rich_text(std::move(page_block->caption_)), is_full_width,
-                                            allow_scrolling);
-    }
-    case telegram_api::pageBlockEmbedPost::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockEmbedPost>(page_block_ptr);
-      auto it = photos.find(page_block->author_photo_id_);
-      Photo author_photo;
-      if (it == photos.end()) {
-        author_photo.id = -2;
-      } else {
-        author_photo = it->second;
-      }
-      return make_unique<PageBlockEmbeddedPost>(
-          std::move(page_block->url_), std::move(page_block->author_), std::move(author_photo), page_block->date_,
-          get_page_blocks(std::move(page_block->blocks_), animations, audios, photos, videos),
-          get_rich_text(std::move(page_block->caption_)));
-    }
-    case telegram_api::pageBlockCollage::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockCollage>(page_block_ptr);
-      return make_unique<PageBlockCollage>(
-          get_page_blocks(std::move(page_block->items_), animations, audios, photos, videos),
-          get_rich_text(std::move(page_block->caption_)));
-    }
-    case telegram_api::pageBlockSlideshow::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockSlideshow>(page_block_ptr);
-      return make_unique<PageBlockSlideshow>(
-          get_page_blocks(std::move(page_block->items_), animations, audios, photos, videos),
-          get_rich_text(std::move(page_block->caption_)));
-    }
-    case telegram_api::pageBlockChannel::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockChannel>(page_block_ptr);
-      CHECK(page_block->channel_ != nullptr);
-      if (page_block->channel_->get_id() == telegram_api::channel::ID) {
-        auto channel = static_cast<telegram_api::channel *>(page_block->channel_.get());
-        ChannelId channel_id(channel->id_);
-        if (!channel_id.is_valid()) {
-          LOG(ERROR) << "Receive invalid " << channel_id;
-          return nullptr;
-        }
-
-        if (td_->contacts_manager_->have_channel_force(channel_id)) {
-          td_->contacts_manager_->on_get_chat(std::move(page_block->channel_));
-          LOG(INFO) << "Receive known min " << channel_id;
-          return make_unique<PageBlockChatLink>(td_->contacts_manager_->get_channel_title(channel_id),
-                                                *td_->contacts_manager_->get_channel_dialog_photo(channel_id),
-                                                td_->contacts_manager_->get_channel_username(channel_id));
-        } else {
-          return make_unique<PageBlockChatLink>(std::move(channel->title_),
-                                                get_dialog_photo(td_->file_manager_.get(), std::move(channel->photo_)),
-                                                std::move(channel->username_));
-        }
-      } else {
-        LOG(ERROR) << "Receive wrong channel " << to_string(page_block->channel_);
-        return nullptr;
-      }
-    }
-    case telegram_api::pageBlockAudio::ID: {
-      auto page_block = move_tl_object_as<telegram_api::pageBlockAudio>(page_block_ptr);
-      auto it = audios.find(page_block->audio_id_);
-      FileId audio_file_id;
-      if (it != audios.end()) {
-        audio_file_id = it->second;
-      }
-      return make_unique<PageBlockAudio>(audio_file_id, get_rich_text(std::move(page_block->caption_)));
-    }
-    default:
-      UNREACHABLE();
-  }
-  return nullptr;
-}
-
-vector<unique_ptr<WebPagesManager::PageBlock>> WebPagesManager::get_page_blocks(
-    vector<tl_object_ptr<telegram_api::PageBlock>> page_block_ptrs, const std::unordered_map<int64, FileId> &animations,
-    const std::unordered_map<int64, FileId> &audios, const std::unordered_map<int64, Photo> &photos,
-    const std::unordered_map<int64, FileId> &videos) const {
-  vector<unique_ptr<PageBlock>> result;
-  result.reserve(page_block_ptrs.size());
-  for (auto &page_block_ptr : page_block_ptrs) {
-    auto page_block = get_page_block(std::move(page_block_ptr), animations, audios, photos, videos);
-    if (page_block != nullptr) {
-      result.push_back(std::move(page_block));
-    }
-  }
-  return result;
-}
-
-void WebPagesManager::on_get_web_page_instant_view(WebPage *web_page, tl_object_ptr<telegram_api::Page> &&page_ptr,
+void WebPagesManager::on_get_web_page_instant_view(WebPage *web_page, tl_object_ptr<telegram_api::page> &&page,
                                                    int32 hash, DialogId owner_dialog_id) {
-  CHECK(page_ptr != nullptr);
-  vector<tl_object_ptr<telegram_api::PageBlock>> page_block_ptrs;
-  vector<tl_object_ptr<telegram_api::Photo>> photo_ptrs;
-  vector<tl_object_ptr<telegram_api::Document>> document_ptrs;
-  downcast_call(*page_ptr, [&](auto &page) {
-    page_block_ptrs = std::move(page.blocks_);
-    photo_ptrs = std::move(page.photos_);
-    document_ptrs = std::move(page.documents_);
-  });
-
+  CHECK(page != nullptr);
   std::unordered_map<int64, Photo> photos;
-  for (auto &photo_ptr : photo_ptrs) {
+  for (auto &photo_ptr : page->photos_) {
     if (photo_ptr->get_id() == telegram_api::photo::ID) {
       Photo photo =
           get_photo(td_->file_manager_.get(), move_tl_object_as<telegram_api::photo>(photo_ptr), owner_dialog_id);
@@ -2546,55 +1201,70 @@ void WebPagesManager::on_get_web_page_instant_view(WebPage *web_page, tl_object_
 
   std::unordered_map<int64, FileId> animations;
   std::unordered_map<int64, FileId> audios;
+  std::unordered_map<int64, FileId> documents;
   std::unordered_map<int64, FileId> videos;
-  for (auto &document_ptr : document_ptrs) {
+  for (auto &document_ptr : page->documents_) {
     if (document_ptr->get_id() == telegram_api::document::ID) {
       auto document = move_tl_object_as<telegram_api::document>(document_ptr);
       auto document_id = document->id_;
       auto parsed_document = td_->documents_manager_->on_get_document(std::move(document), owner_dialog_id);
-      if (parsed_document.first == DocumentsManager::DocumentType::Animation) {
-        animations.emplace(document_id, parsed_document.second);
-      } else if (parsed_document.first == DocumentsManager::DocumentType::Audio) {
-        audios.emplace(document_id, parsed_document.second);
-      } else if (parsed_document.first == DocumentsManager::DocumentType::Video) {
-        videos.emplace(document_id, parsed_document.second);
+      if (parsed_document.type == Document::Type::Animation) {
+        animations.emplace(document_id, parsed_document.file_id);
+      } else if (parsed_document.type == Document::Type::Audio) {
+        audios.emplace(document_id, parsed_document.file_id);
+      } else if (parsed_document.type == Document::Type::General) {
+        documents.emplace(document_id, parsed_document.file_id);
+      } else if (parsed_document.type == Document::Type::Video) {
+        videos.emplace(document_id, parsed_document.file_id);
       } else {
-        LOG(ERROR) << "Receive document of the wrong type " << static_cast<int32>(parsed_document.first);
+        LOG(ERROR) << "Receive document of the wrong type: " << parsed_document;
       }
     }
   }
-  if (web_page->document_type == DocumentsManager::DocumentType::Animation) {
-    auto file_view = td_->file_manager_->get_file_view(web_page->document_file_id);
+  if (web_page->document.type == Document::Type::Animation) {
+    auto file_view = td_->file_manager_->get_file_view(web_page->document.file_id);
     if (file_view.has_remote_location()) {
-      animations.emplace(file_view.remote_location().get_id(), web_page->document_file_id);
+      animations.emplace(file_view.remote_location().get_id(), web_page->document.file_id);
     } else {
       LOG(ERROR) << "Animation has no remote location";
     }
   }
-  if (web_page->document_type == DocumentsManager::DocumentType::Audio) {
-    auto file_view = td_->file_manager_->get_file_view(web_page->document_file_id);
+  if (web_page->document.type == Document::Type::Audio) {
+    auto file_view = td_->file_manager_->get_file_view(web_page->document.file_id);
     if (file_view.has_remote_location()) {
-      audios.emplace(file_view.remote_location().get_id(), web_page->document_file_id);
+      audios.emplace(file_view.remote_location().get_id(), web_page->document.file_id);
     } else {
       LOG(ERROR) << "Audio has no remote location";
     }
   }
-  if (web_page->document_type == DocumentsManager::DocumentType::Video) {
-    auto file_view = td_->file_manager_->get_file_view(web_page->document_file_id);
+  if (web_page->document.type == Document::Type::General) {
+    auto file_view = td_->file_manager_->get_file_view(web_page->document.file_id);
     if (file_view.has_remote_location()) {
-      videos.emplace(file_view.remote_location().get_id(), web_page->document_file_id);
+      documents.emplace(file_view.remote_location().get_id(), web_page->document.file_id);
+    } else {
+      LOG(ERROR) << "Document has no remote location";
+    }
+  }
+  if (web_page->document.type == Document::Type::Video) {
+    auto file_view = td_->file_manager_->get_file_view(web_page->document.file_id);
+    if (file_view.has_remote_location()) {
+      videos.emplace(file_view.remote_location().get_id(), web_page->document.file_id);
     } else {
       LOG(ERROR) << "Video has no remote location";
     }
   }
 
-  LOG(INFO) << "Receive a web page instant view with " << page_block_ptrs.size() << " blocks, " << animations.size()
-            << " animations, " << audios.size() << " audios, " << photos.size() << " photos and " << videos.size()
-            << " videos";
-  web_page->instant_view.page_blocks = get_page_blocks(std::move(page_block_ptrs), animations, audios, photos, videos);
+  LOG(INFO) << "Receive a web page instant view with " << page->blocks_.size() << " blocks, " << animations.size()
+            << " animations, " << audios.size() << " audios, " << documents.size() << " documents, " << photos.size()
+            << " photos and " << videos.size() << " videos";
+  web_page->instant_view.page_blocks =
+      get_web_page_blocks(td_, std::move(page->blocks_), animations, audios, documents, photos, videos);
+  web_page->instant_view.is_v2 = (page->flags_ & telegram_api::page::V2_MASK) != 0;
+  web_page->instant_view.is_rtl = (page->flags_ & telegram_api::page::RTL_MASK) != 0;
   web_page->instant_view.hash = hash;
+  web_page->instant_view.url = std::move(page->url_);
   web_page->instant_view.is_empty = false;
-  web_page->instant_view.is_full = page_ptr->get_id() == telegram_api::pageFull::ID;
+  web_page->instant_view.is_full = (page->flags_ & telegram_api::page::PART_MASK) == 0;
   web_page->instant_view.is_loaded = true;
 
   LOG(DEBUG) << "Receive web page instant view: "
@@ -2627,7 +1297,7 @@ class WebPagesManager::WebPageLogEvent {
   }
 };
 
-void WebPagesManager::save_web_page(WebPage *web_page, WebPageId web_page_id, bool from_binlog) {
+void WebPagesManager::save_web_page(const WebPage *web_page, WebPageId web_page_id, bool from_binlog) {
   if (!G()->parameters().use_message_db) {
     return;
   }
@@ -2680,7 +1350,7 @@ string WebPagesManager::get_web_page_database_key(WebPageId web_page_id) {
 }
 
 void WebPagesManager::on_save_web_page_to_database(WebPageId web_page_id, bool success) {
-  WebPage *web_page = get_web_page(web_page_id);
+  const WebPage *web_page = get_web_page(web_page_id);
   if (web_page == nullptr) {
     LOG(ERROR) << "Can't find " << (success ? "saved " : "failed to save ") << web_page_id;
     return;
@@ -2734,11 +1404,13 @@ void WebPagesManager::on_load_web_page_from_database(WebPageId web_page_id, stri
   //  G()->td_db()->get_sqlite_pmc()->erase(get_web_page_database_key(web_page_id), Auto());
   //  return;
 
-  WebPage *web_page = get_web_page(web_page_id);
-  if (web_page == nullptr) {
+  if (!have_web_page(web_page_id)) {
     if (!value.empty()) {
       auto result = make_unique<WebPage>();
-      log_event_parse(*result, value).ensure();
+      auto status = log_event_parse(*result, value);
+      if (status.is_error()) {
+        LOG(FATAL) << status << ": " << format::as_hex_dump<4>(Slice(value));
+      }
       update_web_page(std::move(result), web_page_id, true, true);
     }
   } else {
@@ -2754,8 +1426,8 @@ bool WebPagesManager::have_web_page_force(WebPageId web_page_id) {
   return get_web_page_force(web_page_id) != nullptr;
 }
 
-WebPagesManager::WebPage *WebPagesManager::get_web_page_force(WebPageId web_page_id) {
-  WebPage *web_page = get_web_page(web_page_id);
+const WebPagesManager::WebPage *WebPagesManager::get_web_page_force(WebPageId web_page_id) {
+  const WebPage *web_page = get_web_page(web_page_id);
   if (web_page != nullptr) {
     return web_page;
   }
@@ -2766,18 +1438,57 @@ WebPagesManager::WebPage *WebPagesManager::get_web_page_force(WebPageId web_page
     return nullptr;
   }
 
-  LOG(INFO) << "Try load " << web_page_id << " from database";
+  LOG(INFO) << "Trying to load " << web_page_id << " from database";
   on_load_web_page_from_database(web_page_id,
                                  G()->td_db()->get_sqlite_sync_pmc()->get(get_web_page_database_key(web_page_id)));
   return get_web_page(web_page_id);
 }
 
+FileSourceId WebPagesManager::get_web_page_file_source_id(WebPage *web_page) {
+  if (!web_page->file_source_id.is_valid()) {
+    web_page->file_source_id = td_->file_reference_manager_->create_web_page_file_source(web_page->url);
+  }
+  return web_page->file_source_id;
+}
+
+FileSourceId WebPagesManager::get_url_file_source_id(const string &url) {
+  auto web_page_id = get_web_page_by_url(url);
+  if (web_page_id.is_valid()) {
+    const WebPage *web_page = get_web_page(web_page_id);
+    if (web_page != nullptr) {
+      if (!web_page->file_source_id.is_valid()) {
+        web_pages_[web_page_id]->file_source_id =
+            td_->file_reference_manager_->create_web_page_file_source(web_page->url);
+      }
+      return web_page->file_source_id;
+    }
+  }
+  return url_to_file_source_id_[url] = td_->file_reference_manager_->create_web_page_file_source(url);
+}
+
 string WebPagesManager::get_web_page_search_text(WebPageId web_page_id) const {
-  auto *web_page = get_web_page(web_page_id);
+  const WebPage *web_page = get_web_page(web_page_id);
   if (web_page == nullptr) {
     return "";
   }
   return PSTRING() << web_page->title + " " + web_page->description;
+}
+
+vector<FileId> WebPagesManager::get_web_page_file_ids(const WebPage *web_page) const {
+  if (web_page == nullptr) {
+    return vector<FileId>();
+  }
+
+  vector<FileId> result = photo_get_file_ids(web_page->photo);
+  if (!web_page->document.empty()) {
+    append(result, web_page->document.get_file_ids(td_));
+  }
+  if (!web_page->instant_view.is_empty) {
+    for (auto &page_block : web_page->instant_view.page_blocks) {
+      page_block->append_file_ids(result);
+    }
+  }
+  return result;
 }
 
 }  // namespace td

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,30 +8,34 @@
 
 #include "td/utils/common.h"
 #include "td/utils/logging.h"
+#include "td/utils/misc.h"
 #include "td/utils/port/thread_local.h"
 #include "td/utils/Slice.h"
 
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 namespace td {
 
 struct BufferRaw {
+  explicit BufferRaw(size_t size) : data_size_(size) {
+  }
   size_t data_size_;
 
   // Constant after first reader is created.
   // May be change by writer before it.
   // So writer may do prepends till there is no reader created.
-  size_t begin_;
+  size_t begin_ = 0;
 
   // Write by writer.
   // Read by reader.
-  std::atomic<size_t> end_;
+  std::atomic<size_t> end_{0};
 
-  mutable std::atomic<int32> ref_cnt_;
-  std::atomic<bool> has_writer_;
-  bool was_reader_;
+  mutable std::atomic<int32> ref_cnt_{1};
+  std::atomic<bool> has_writer_{true};
+  bool was_reader_{false};
 
   alignas(4) unsigned char data_[1];
 };
@@ -143,6 +147,10 @@ class BufferSlice {
     return Slice(buffer_->data_ + begin_, size());
   }
 
+  operator Slice() const {
+    return as_slice();
+  }
+
   MutableSlice as_slice() {
     if (is_null()) {
       return MutableSlice();
@@ -202,7 +210,15 @@ class BufferSlice {
   }
 
   size_t size() const {
+    if (is_null()) {
+      return 0;
+    }
     return end_ - begin_;
+  }
+
+  // like in std::string
+  size_t length() const {
+    return size();
   }
 
   // set end_ into writer's end_
@@ -215,6 +231,11 @@ class BufferSlice {
   bool is_writer_alive() const {
     CHECK(!is_null());
     return buffer_->has_writer_.load(std::memory_order_acquire);
+  }
+  void clear() {
+    begin_ = 0;
+    end_ = 0;
+    buffer_ = nullptr;
   }
 
  private:
@@ -240,6 +261,10 @@ class BufferWriter {
   }
   BufferWriter(size_t size, size_t prepend, size_t append)
       : BufferWriter(BufferAllocator::create_writer(size, prepend, append)) {
+  }
+  BufferWriter(Slice slice, size_t prepend, size_t append)
+      : BufferWriter(BufferAllocator::create_writer(slice.size(), prepend, append)) {
+    as_slice().copy_from(slice);
   }
   explicit BufferWriter(BufferWriterPtr buffer_ptr) : buffer_(std::move(buffer_ptr)) {
   }
@@ -570,14 +595,14 @@ class ChainBufferReader {
 
   // Return [begin_, tail.begin_)
   // *this = tail
-  ChainBufferReader cut_head(ChainBufferIterator pos) {
+  ChainBufferReader cut_head(ChainBufferIterator pos) TD_WARN_UNUSED_RESULT {
     auto tmp = begin_.clone();
     begin_ = pos.clone();
     return ChainBufferReader(std::move(tmp), std::move(pos), false);
   }
 
-  ChainBufferReader cut_head(size_t offset) {
-    CHECK(offset <= size()) << offset << " " << size();
+  ChainBufferReader cut_head(size_t offset) TD_WARN_UNUSED_RESULT {
+    LOG_CHECK(offset <= size()) << offset << " " << size();
     auto it = begin_.clone();
     it.advance(offset);
     return cut_head(std::move(it));
@@ -613,11 +638,6 @@ class ChainBufferWriter {
  public:
   ChainBufferWriter() {
     init();
-  }
-
-  // legacy
-  static ChainBufferWriter create_empty(size_t size = 0) {
-    return ChainBufferWriter();
   }
 
   void init(size_t size = 0) {
@@ -704,5 +724,51 @@ class ChainBufferWriter {
   ChainBufferNodeWriterPtr tail_;
   BufferWriter writer_;
 };
+
+class BufferBuilder {
+ public:
+  BufferBuilder() = default;
+  BufferBuilder(Slice slice, size_t prepend_size, size_t append_size)
+      : buffer_writer_(slice, prepend_size, append_size) {
+  }
+
+  void append(BufferSlice slice);
+  void append(Slice slice);
+
+  void prepend(BufferSlice slice);
+  void prepend(Slice slice);
+
+  template <class F>
+  void for_each(F &&f) {
+    for (auto &slice : reversed(to_prepend_)) {
+      f(slice);
+    }
+    if (!buffer_writer_.empty()) {
+      f(buffer_writer_.as_buffer_slice());
+    }
+    for (auto &slice : to_append_) {
+      f(slice);
+    }
+  }
+
+  BufferSlice extract();
+
+ private:
+  BufferWriter buffer_writer_;
+  std::vector<BufferSlice> to_append_;
+  std::vector<BufferSlice> to_prepend_;
+
+  bool append_inplace(Slice slice);
+  void append_slow(BufferSlice slice);
+  bool prepend_inplace(Slice slice);
+  void prepend_slow(BufferSlice slice);
+};
+
+inline Slice as_slice(const BufferSlice &value) {
+  return value.as_slice();
+}
+inline MutableSlice as_slice(BufferSlice &value) {
+  return value.as_slice();
+}
 
 }  // namespace td

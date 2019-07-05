@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,6 +9,7 @@
 #include "td/telegram/ContactsManager.h"
 #include "td/telegram/misc.h"
 
+#include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/unicode.h"
@@ -181,14 +182,14 @@ static vector<Slice> match_mentions(Slice str) {
   // '/(?<=\B)@([a-zA-Z0-9_]{2,32})(?=\b)/u'
 
   while (true) {
-    ptr = reinterpret_cast<const unsigned char *>(std::memchr(ptr, '@', narrow_cast<int32>(end - ptr)));
+    ptr = static_cast<const unsigned char *>(std::memchr(ptr, '@', narrow_cast<int32>(end - ptr)));
     if (ptr == nullptr) {
       break;
     }
 
     if (ptr != begin) {
       uint32 prev;
-      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev);
+      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev, "match_mentions");
 
       if (is_word_character(prev)) {
         ptr++;
@@ -206,7 +207,7 @@ static vector<Slice> match_mentions(Slice str) {
     }
     uint32 next = 0;
     if (ptr != end) {
-      next_utf8_unsafe(ptr, &next);
+      next_utf8_unsafe(ptr, &next, "match_mentions 2");
     }
     if (is_word_character(next)) {
       continue;
@@ -225,14 +226,14 @@ static vector<Slice> match_bot_commands(Slice str) {
   // '/(?<!\b|[\/<>])\/([a-zA-Z0-9_]{1,64})(?:@([a-zA-Z0-9_]{3,32}))?(?!\B|[\/<>])/u'
 
   while (true) {
-    ptr = reinterpret_cast<const unsigned char *>(std::memchr(ptr, '/', narrow_cast<int32>(end - ptr)));
+    ptr = static_cast<const unsigned char *>(std::memchr(ptr, '/', narrow_cast<int32>(end - ptr)));
     if (ptr == nullptr) {
       break;
     }
 
     if (ptr != begin) {
       uint32 prev;
-      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev);
+      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev, "match_bot_commands");
 
       if (is_word_character(prev) || prev == '/' || prev == '<' || prev == '>') {
         ptr++;
@@ -265,7 +266,7 @@ static vector<Slice> match_bot_commands(Slice str) {
 
     uint32 next = 0;
     if (ptr != end) {
-      next_utf8_unsafe(ptr, &next);
+      next_utf8_unsafe(ptr, &next, "match_bot_commands 2");
     }
     if (is_word_character(next) || next == '/' || next == '<' || next == '>') {
       continue;
@@ -301,14 +302,14 @@ static vector<Slice> match_hashtags(Slice str) {
   UnicodeSimpleCategory category;
 
   while (true) {
-    ptr = reinterpret_cast<const unsigned char *>(std::memchr(ptr, '#', narrow_cast<int32>(end - ptr)));
+    ptr = static_cast<const unsigned char *>(std::memchr(ptr, '#', narrow_cast<int32>(end - ptr)));
     if (ptr == nullptr) {
       break;
     }
 
     if (ptr != begin) {
       uint32 prev;
-      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev);
+      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev, "match_hashtags");
 
       if (is_hashtag_letter(prev, category)) {
         ptr++;
@@ -321,7 +322,7 @@ static vector<Slice> match_hashtags(Slice str) {
     bool was_letter = false;
     while (ptr != end) {
       uint32 code;
-      auto next_ptr = next_utf8_unsafe(ptr, &code);
+      auto next_ptr = next_utf8_unsafe(ptr, &code, "match_hashtags 2");
       if (!is_hashtag_letter(code, category)) {
         break;
       }
@@ -362,14 +363,14 @@ static vector<Slice> match_cashtags(Slice str) {
 
   UnicodeSimpleCategory category;
   while (true) {
-    ptr = reinterpret_cast<const unsigned char *>(std::memchr(ptr, '$', narrow_cast<int32>(end - ptr)));
+    ptr = static_cast<const unsigned char *>(std::memchr(ptr, '$', narrow_cast<int32>(end - ptr)));
     if (ptr == nullptr) {
       break;
     }
 
     if (ptr != begin) {
       uint32 prev;
-      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev);
+      next_utf8_unsafe(prev_utf8_unsafe(ptr), &prev, "match_cashtags");
 
       if (is_hashtag_letter(prev, category) || prev == '$') {
         ptr++;
@@ -389,7 +390,7 @@ static vector<Slice> match_cashtags(Slice str) {
 
     if (cashtag_end != end) {
       uint32 code;
-      next_utf8_unsafe(ptr, &code);
+      next_utf8_unsafe(ptr, &code, "match_cashtags 2");
       if (is_hashtag_letter(code, category) || code == '$') {
         continue;
       }
@@ -479,7 +480,7 @@ static vector<Slice> match_urls(Slice str) {
     const unsigned char *domain_end_ptr = begin + dot_pos;
     while (domain_end_ptr != end) {
       uint32 code = 0;
-      auto next_ptr = next_utf8_unsafe(domain_end_ptr, &code);
+      auto next_ptr = next_utf8_unsafe(domain_end_ptr, &code, "match_urls");
       if (code == '@') {
         last_at_ptr = domain_end_ptr;
       }
@@ -491,7 +492,7 @@ static vector<Slice> match_urls(Slice str) {
     domain_end_ptr = last_at_ptr == nullptr ? begin + dot_pos : last_at_ptr + 1;
     while (domain_end_ptr != end) {
       uint32 code = 0;
-      auto next_ptr = next_utf8_unsafe(domain_end_ptr, &code);
+      auto next_ptr = next_utf8_unsafe(domain_end_ptr, &code, "match_urls 2");
       if (!is_domain_symbol(code)) {
         break;
       }
@@ -502,7 +503,7 @@ static vector<Slice> match_urls(Slice str) {
     while (domain_begin_ptr != begin) {
       domain_begin_ptr = prev_utf8_unsafe(domain_begin_ptr);
       uint32 code = 0;
-      auto next_ptr = next_utf8_unsafe(domain_begin_ptr, &code);
+      auto next_ptr = next_utf8_unsafe(domain_begin_ptr, &code, "match_urls 3");
       if (last_at_ptr == nullptr ? !is_domain_symbol(code) : !is_user_data_symbol(code)) {
         domain_begin_ptr = next_ptr;
         break;
@@ -533,7 +534,7 @@ static vector<Slice> match_urls(Slice str) {
       auto path_end_ptr = url_end_ptr + 1;
       while (path_end_ptr != end) {
         uint32 code = 0;
-        auto next_ptr = next_utf8_unsafe(path_end_ptr, &code);
+        auto next_ptr = next_utf8_unsafe(path_end_ptr, &code, "match_urls 4");
         if (!is_path_symbol(code)) {
           break;
         }
@@ -558,7 +559,7 @@ static vector<Slice> match_urls(Slice str) {
       while (user_data_begin_ptr != begin) {
         user_data_begin_ptr = prev_utf8_unsafe(user_data_begin_ptr);
         uint32 code = 0;
-        auto next_ptr = next_utf8_unsafe(user_data_begin_ptr, &code);
+        auto next_ptr = next_utf8_unsafe(user_data_begin_ptr, &code, "match_urls 5");
         if (!is_user_data_symbol(code)) {
           user_data_begin_ptr = next_ptr;
           break;
@@ -578,7 +579,7 @@ static vector<Slice> match_urls(Slice str) {
         while (protocol_begin_ptr != begin) {
           protocol_begin_ptr = prev_utf8_unsafe(protocol_begin_ptr);
           uint32 code = 0;
-          auto next_ptr = next_utf8_unsafe(protocol_begin_ptr, &code);
+          auto next_ptr = next_utf8_unsafe(protocol_begin_ptr, &code, "match_urls 6");
           if (!is_protocol_symbol(code)) {
             protocol_begin_ptr = next_ptr;
             break;
@@ -600,13 +601,13 @@ static vector<Slice> match_urls(Slice str) {
         auto prefix_end = prefix.uend();
         auto prefix_back = prev_utf8_unsafe(prefix_end);
         uint32 code = 0;
-        next_utf8_unsafe(prefix_back, &code);
+        next_utf8_unsafe(prefix_back, &code, "match_urls 7");
         if (is_word_character(code) || code == '/' || code == '#' || code == '@') {
           is_bad = true;
         }
       }
     }
-    // LOG(ERROR) << "full: " << Slice(url_begin_ptr, url_end_ptr) << " " << is_bad;
+    // LOG(ERROR) << "Full: " << Slice(url_begin_ptr, url_end_ptr) << " " << is_bad;
 
     if (!is_bad) {
       if (url_end_ptr > begin + dot_pos + 1) {
@@ -1116,7 +1117,7 @@ vector<MessageEntity> find_entities(Slice text, bool skip_bot_commands, bool onl
     while (ptr != end && cnt > 0) {
       unsigned char c = ptr[0];
       utf16_pos += 1 + (c >= 0xf0);
-      ptr = next_utf8_unsafe(ptr, nullptr);
+      ptr = next_utf8_unsafe(ptr, nullptr, "match_urls 8");
 
       pos = static_cast<int32>(ptr - begin);
       if (entity_begin == pos) {
@@ -1615,6 +1616,12 @@ Result<vector<MessageEntity>> parse_html(string &text) {
       utf16_offset += utf16_entity_length;
     }
   }
+  if (!check_utf8(result)) {
+    return Status::Error(400,
+                         "Text contains invalid Unicode characters after decoding HTML entities, check for unmatched "
+                         "surrogate code units");
+  }
+
   text = result;
   return entities;
 }
@@ -1654,7 +1661,7 @@ vector<tl_object_ptr<telegram_api::MessageEntity>> get_input_message_entities(co
         break;
       case MessageEntity::Type::MentionName: {
         auto input_user = contacts_manager->get_input_user(entity.user_id);
-        CHECK(input_user != nullptr) << source;
+        LOG_CHECK(input_user != nullptr) << source;
         result.push_back(make_tl_object<telegram_api::inputMessageEntityMentionName>(entity.offset, entity.length,
                                                                                      std::move(input_user)));
         break;
@@ -1665,6 +1672,15 @@ vector<tl_object_ptr<telegram_api::MessageEntity>> get_input_message_entities(co
   }
 
   return result;
+}
+
+vector<tl_object_ptr<telegram_api::MessageEntity>> get_input_message_entities(const ContactsManager *contacts_manager,
+                                                                              const FormattedText *text,
+                                                                              const char *source) {
+  if (text != nullptr && !text->entities.empty()) {
+    return get_input_message_entities(contacts_manager, text->entities, source);
+  }
+  return {};
 }
 
 vector<tl_object_ptr<secret_api::MessageEntity>> get_input_secret_message_entities(
@@ -1720,7 +1736,7 @@ vector<tl_object_ptr<secret_api::MessageEntity>> get_input_secret_message_entiti
 }
 
 Result<vector<MessageEntity>> get_message_entities(const ContactsManager *contacts_manager,
-                                                   const vector<tl_object_ptr<td_api::textEntity>> &input_entities) {
+                                                   vector<tl_object_ptr<td_api::textEntity>> &&input_entities) {
   vector<MessageEntity> entities;
   for (auto &entity : input_entities) {
     if (entity == nullptr || entity->type_ == nullptr) {
@@ -1880,7 +1896,7 @@ vector<MessageEntity> get_message_entities(const ContactsManager *contacts_manag
           continue;
         }
         if (!contacts_manager->have_input_user(user_id)) {
-          LOG(ERROR) << "Receive unaccessible " << user_id << " in MentionName from " << source;
+          LOG(ERROR) << "Receive inaccessible " << user_id << " in MentionName from " << source;
           continue;
         }
         entities.emplace_back(entity_mention_name->offset_, entity_mention_name->length_, user_id);
@@ -1990,17 +2006,18 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
   fix_entities(entities);
 
   bool in_entity = false;
-  bool has_non_space_in_entity = false;
+  bool have_space_in_entity = false;
+  bool have_non_whitespace_in_entity = false;
   size_t current_entity = 0;
   int32 skipped_before_current_entity = 0;
-  size_t left_entities = 0;  // will remove all entities containing spaces only
+  size_t left_entities = 0;  // will remove entities containing whitespaces only
 
   int32 utf16_offset = 0;
   int32 utf16_skipped = 0;
 
   size_t text_size = text.size();
-  size_t last_non_space_pos = text_size + 1;
-  int32 last_non_space_utf16_offset = 0;
+  size_t last_non_whitespace_pos = text_size + 1;
+  int32 last_non_whitespace_utf16_offset = 0;
 
   string result;
   result.reserve(text_size);
@@ -2020,7 +2037,10 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
           entities[current_entity].length -= utf16_skipped - skipped_before_current_entity;
           in_entity = false;
 
-          if (has_non_space_in_entity) {
+          auto entity_type = entities[current_entity].type;
+          auto have_hidden_data =
+              entity_type == MessageEntity::Type::TextUrl || entity_type == MessageEntity::Type::MentionName;
+          if (have_non_whitespace_in_entity || (have_space_in_entity && have_hidden_data)) {
             // TODO check entities for validness, for example, that mentions, hashtags, cashtags and URLs are valid
             if (current_entity != left_entities) {
               entities[left_entities] = std::move(entities[current_entity]);
@@ -2036,7 +2056,8 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
           return Status::Error(16, PSLICE() << "Entity begins in a middle of a UTF-16 symbol at byte offset " << pos);
         }
         in_entity = true;
-        has_non_space_in_entity = false;
+        have_space_in_entity = false;
+        have_non_whitespace_in_entity = false;
         skipped_before_current_entity = utf16_skipped;
       }
     }
@@ -2079,6 +2100,7 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
       case 30:
       case 31:
       case 32:
+        have_space_in_entity = true;
         result.push_back(' ');
         utf16_offset++;
         break;
@@ -2115,16 +2137,16 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
         result.push_back(text[pos]);
 
         if (c != '\n') {
-          has_non_space_in_entity = true;
-          last_non_space_pos = result.size();
-          last_non_space_utf16_offset = utf16_offset - utf16_skipped;
+          have_non_whitespace_in_entity = true;
+          last_non_whitespace_pos = result.size();
+          last_non_whitespace_utf16_offset = utf16_offset - utf16_skipped;
         }
         break;
     }
   }
   entities.erase(entities.begin() + left_entities, entities.end());
 
-  if (last_non_space_pos == text_size + 1) {
+  if (last_non_whitespace_pos == text_size + 1) {
     if (allow_empty) {
       text.clear();
       entities.clear();
@@ -2137,24 +2159,29 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
     text = std::move(result);
   } else {
     // rtrim
-    result.resize(last_non_space_pos);
+    result.resize(last_non_whitespace_pos);
+    while (!entities.empty() && entities.back().offset >= last_non_whitespace_utf16_offset) {
+      CHECK(entities.back().type == MessageEntity::Type::TextUrl ||
+            entities.back().type == MessageEntity::Type::MentionName);
+      entities.pop_back();
+    }
     for (auto &entity : entities) {
-      if (entity.offset + entity.length > last_non_space_utf16_offset) {
-        entity.length = last_non_space_utf16_offset - entity.offset;
+      if (entity.offset + entity.length > last_non_whitespace_utf16_offset) {
+        entity.length = last_non_whitespace_utf16_offset - entity.offset;
         CHECK(entity.length > 0);
       }
     }
 
     // ltrim
-    size_t first_non_spaces_pos = 0;
+    size_t first_non_whitespaces_pos = 0;
     size_t first_entity_begin_pos = entities.empty() ? result.size() : entities[0].offset;
-    while (first_non_spaces_pos < first_entity_begin_pos &&
-           (result[first_non_spaces_pos] == ' ' || result[first_non_spaces_pos] == '\n')) {
-      first_non_spaces_pos++;
+    while (first_non_whitespaces_pos < first_entity_begin_pos &&
+           (result[first_non_whitespaces_pos] == ' ' || result[first_non_whitespaces_pos] == '\n')) {
+      first_non_whitespaces_pos++;
     }
-    if (first_non_spaces_pos > 0) {
-      int32 offset = narrow_cast<int32>(first_non_spaces_pos);
-      text = result.substr(first_non_spaces_pos);
+    if (first_non_whitespaces_pos > 0) {
+      int32 offset = narrow_cast<int32>(first_non_whitespaces_pos);
+      text = result.substr(first_non_whitespaces_pos);
       for (auto &entity : entities) {
         entity.offset -= offset;
         CHECK(entity.offset >= 0);
@@ -2194,6 +2221,100 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
   // TODO MAX_MESSAGE_LENGTH and MAX_CAPTION_LENGTH
 
   return Status::OK();
+}
+
+FormattedText get_message_text(const ContactsManager *contacts_manager, string message_text,
+                               vector<tl_object_ptr<telegram_api::MessageEntity>> &&server_entities,
+                               bool skip_new_entities, int32 send_date, const char *source) {
+  auto entities = get_message_entities(contacts_manager, std::move(server_entities), source);
+  auto status = fix_formatted_text(message_text, entities, true, skip_new_entities, true, false);
+  if (status.is_error()) {
+    if (send_date == 0 || send_date > 1497000000) {  // approximate fix date
+      LOG(ERROR) << "Receive error " << status << " while parsing message from " << source << " with content \""
+                 << message_text << "\" sent at " << send_date << " with entities " << format::as_array(entities);
+    }
+    if (!clean_input_string(message_text)) {
+      message_text.clear();
+    }
+    entities.clear();
+  }
+  return FormattedText{std::move(message_text), std::move(entities)};
+}
+
+td_api::object_ptr<td_api::formattedText> extract_input_caption(
+    tl_object_ptr<td_api::InputMessageContent> &input_message_content) {
+  switch (input_message_content->get_id()) {
+    case td_api::inputMessageAnimation::ID: {
+      auto input_animation = static_cast<td_api::inputMessageAnimation *>(input_message_content.get());
+      return std::move(input_animation->caption_);
+    }
+    case td_api::inputMessageAudio::ID: {
+      auto input_audio = static_cast<td_api::inputMessageAudio *>(input_message_content.get());
+      return std::move(input_audio->caption_);
+    }
+    case td_api::inputMessageDocument::ID: {
+      auto input_document = static_cast<td_api::inputMessageDocument *>(input_message_content.get());
+      return std::move(input_document->caption_);
+    }
+    case td_api::inputMessagePhoto::ID: {
+      auto input_photo = static_cast<td_api::inputMessagePhoto *>(input_message_content.get());
+      return std::move(input_photo->caption_);
+    }
+    case td_api::inputMessageVideo::ID: {
+      auto input_video = static_cast<td_api::inputMessageVideo *>(input_message_content.get());
+      return std::move(input_video->caption_);
+    }
+    case td_api::inputMessageVoiceNote::ID: {
+      auto input_voice_note = static_cast<td_api::inputMessageVoiceNote *>(input_message_content.get());
+      return std::move(input_voice_note->caption_);
+    }
+    default:
+      return nullptr;
+  }
+}
+
+Result<FormattedText> process_input_caption(const ContactsManager *contacts_manager, DialogId dialog_id,
+                                            tl_object_ptr<td_api::formattedText> &&caption, bool is_bot) {
+  if (caption == nullptr) {
+    return FormattedText();
+  }
+  TRY_RESULT(entities, get_message_entities(contacts_manager, std::move(caption->entities_)));
+  TRY_STATUS(fix_formatted_text(caption->text_, entities, true, false,
+                                need_skip_bot_commands(contacts_manager, dialog_id, is_bot), false));
+  return FormattedText{std::move(caption->text_), std::move(entities)};
+}
+
+void add_formatted_text_dependencies(Dependencies &dependencies, const FormattedText *text) {
+  if (text == nullptr) {
+    return;
+  }
+  for (auto &entity : text->entities) {
+    if (entity.user_id.is_valid()) {
+      dependencies.user_ids.insert(entity.user_id);
+    }
+  }
+}
+
+bool need_skip_bot_commands(const ContactsManager *contacts_manager, DialogId dialog_id, bool is_bot) {
+  if (is_bot) {
+    return false;
+  }
+
+  switch (dialog_id.get_type()) {
+    case DialogType::User:
+      return !contacts_manager->is_user_bot(dialog_id.get_user_id());
+    case DialogType::SecretChat: {
+      auto user_id = contacts_manager->get_secret_chat_user_id(dialog_id.get_secret_chat_id());
+      return !contacts_manager->is_user_bot(user_id);
+    }
+    case DialogType::Chat:
+    case DialogType::Channel:
+    case DialogType::None:
+      return false;
+    default:
+      UNREACHABLE();
+      return false;
+  }
 }
 
 }  // namespace td

@@ -1,22 +1,21 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
+#include "td/mtproto/TransportType.h"
+
 #include "td/utils/buffer.h"
-#include "td/utils/port/Fd.h"
+#include "td/utils/common.h"
+#include "td/utils/port/detail/PollableFd.h"
 #include "td/utils/Status.h"
 
 namespace td {
 namespace mtproto {
-struct TransportType {
-  enum { Tcp, ObfuscatedTcp, Http } type;
-  int16 dc_id;
-  std::string secret;
-};
+
 class IStreamTransport {
  public:
   IStreamTransport() = default;
@@ -34,6 +33,7 @@ class IStreamTransport {
   virtual TransportType get_type() const = 0;
 };
 
-std::unique_ptr<IStreamTransport> create_transport(TransportType type);
+unique_ptr<IStreamTransport> create_transport(TransportType type);
+
 }  // namespace mtproto
 }  // namespace td

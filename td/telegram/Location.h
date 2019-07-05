@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -15,8 +15,11 @@
 #include "td/telegram/telegram_api.h"
 
 #include "td/utils/common.h"
+#include "td/utils/Status.h"
 #include "td/utils/StringBuilder.h"
 #include "td/utils/tl_helpers.h"
+
+#include <utility>
 
 namespace td {
 
@@ -24,7 +27,7 @@ class Location {
   bool is_empty_ = true;
   double latitude_ = 0.0;
   double longitude_ = 0.0;
-  int64 access_hash_ = 0;
+  mutable int64 access_hash_ = 0;
 
   friend bool operator==(const Location &lhs, const Location &rhs);
   friend bool operator!=(const Location &lhs, const Location &rhs);
@@ -66,7 +69,7 @@ class Location {
     return access_hash_;
   }
 
-  void set_access_hash(int64 access_hash) {
+  void set_access_hash(int64 access_hash) const {
     access_hash_ = access_hash;
   }
 
@@ -134,11 +137,9 @@ class Venue {
 
   bool empty() const;
 
-  const Location &location() const;
+  Location &location();
 
-  void set_access_hash(int64 access_hash) {
-    location_.set_access_hash(access_hash);
-  }
+  const Location &location() const;
 
   tl_object_ptr<td_api::venue> get_venue_object() const;
 
@@ -179,5 +180,11 @@ bool operator==(const Venue &lhs, const Venue &rhs);
 bool operator!=(const Venue &lhs, const Venue &rhs);
 
 StringBuilder &operator<<(StringBuilder &string_builder, const Venue &venue);
+
+Result<std::pair<Location, int32>> process_input_message_location(
+    td_api::object_ptr<td_api::InputMessageContent> &&input_message_content) TD_WARN_UNUSED_RESULT;
+
+Result<Venue> process_input_message_venue(td_api::object_ptr<td_api::InputMessageContent> &&input_message_content)
+    TD_WARN_UNUSED_RESULT;
 
 }  // namespace td

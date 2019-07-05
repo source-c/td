@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,6 +9,7 @@
 #include "td/telegram/logevent/LogEvent.h"
 #include "td/telegram/Version.h"
 
+#include "td/db/SqliteConnectionSafe.h"
 #include "td/db/SqliteDb.h"
 #include "td/db/SqliteStatement.h"
 
@@ -40,7 +41,7 @@ static constexpr int32 MESSAGES_DB_INDEX_COUNT_OLD = 9;
 
 // NB: must happen inside a transaction
 Status init_messages_db(SqliteDb &db, int32 version) {
-  LOG(INFO) << "Init message db " << tag("version", version);
+  LOG(INFO) << "Init message database " << tag("version", version);
 
   // Check if database exists
   TRY_RESULT(has_table, db.has_table("messages"));
@@ -92,18 +93,25 @@ Status init_messages_db(SqliteDb &db, int32 version) {
     }
     return Status::OK();
   };
+  auto add_notification_id_index = [&db]() {
+    TRY_STATUS(
+        db.exec("CREATE INDEX IF NOT EXISTS message_by_notification_id ON messages (dialog_id, notification_id) "
+                "WHERE notification_id IS NOT NULL"));
+    return Status::OK();
+  };
 
   if (version == 0) {
-    LOG(INFO) << "Create new messages db";
+    LOG(INFO) << "Create new message database";
     TRY_STATUS(
         db.exec("CREATE TABLE IF NOT EXISTS messages (dialog_id INT8, message_id INT8, "
                 "unique_message_id INT4, sender_user_id INT4, random_id INT8, data BLOB, "
-                "ttl_expires_at INT4, index_mask INT4, search_id INT8, text STRING, PRIMARY KEY "
+                "ttl_expires_at INT4, index_mask INT4, search_id INT8, text STRING, notification_id INT4, PRIMARY KEY "
                 "(dialog_id, message_id))"));
 
     TRY_STATUS(
         db.exec("CREATE INDEX IF NOT EXISTS message_by_random_id ON messages (dialog_id, random_id) "
                 "WHERE random_id IS NOT NULL"));
+
     TRY_STATUS(
         db.exec("CREATE INDEX IF NOT EXISTS message_by_unique_message_id ON messages "
                 "(unique_message_id) WHERE unique_message_id IS NOT NULL"));
@@ -117,6 +125,8 @@ Status init_messages_db(SqliteDb &db, int32 version) {
     TRY_STATUS(add_fts());
 
     TRY_STATUS(add_call_index());
+
+    TRY_STATUS(add_notification_id_index());
 
     version = current_db_version();
   }
@@ -135,12 +145,17 @@ Status init_messages_db(SqliteDb &db, int32 version) {
   if (version < static_cast<int32>(DbVersion::MessagesCallIndex)) {
     TRY_STATUS(add_call_index());
   }
+  if (version < static_cast<int32>(DbVersion::AddNotificationsSupport)) {
+    TRY_STATUS(db.exec("ALTER TABLE messages ADD COLUMN notification_id INT4"));
+    TRY_STATUS(add_notification_id_index());
+  }
   return Status::OK();
 }
 
 // NB: must happen inside a transaction
 Status drop_messages_db(SqliteDb &db, int32 version) {
-  LOG(WARNING) << "Drop messages db " << tag("version", version) << tag("current_db_version", current_db_version());
+  LOG(WARNING) << "Drop message database " << tag("version", version)
+               << tag("current_db_version", current_db_version());
   return db.exec("DROP TABLE IF EXISTS messages");
 }
 
@@ -151,8 +166,9 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
   }
 
   Status init() {
-    TRY_RESULT(add_message_stmt,
-               db_.get_statement("INSERT OR REPLACE INTO messages VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"));
+    TRY_RESULT(
+        add_message_stmt,
+        db_.get_statement("INSERT OR REPLACE INTO messages VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"));
     TRY_RESULT(delete_message_stmt, db_.get_statement("DELETE FROM messages WHERE dialog_id = ?1 AND message_id = ?2"));
     TRY_RESULT(delete_all_dialog_messages_stmt,
                db_.get_statement("DELETE FROM messages WHERE dialog_id = ?1 AND message_id <= ?2"));
@@ -178,6 +194,9 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
                                  "message_id > ?2 ORDER BY message_id ASC LIMIT ?3"));
     TRY_RESULT(get_messages_desc_stmt, db_.get_statement("SELECT data, message_id FROM messages WHERE dialog_id = ?1 "
                                                          "AND message_id < ?2 ORDER BY message_id DESC LIMIT ?3"));
+    TRY_RESULT(get_messages_from_notification_id_stmt,
+               db_.get_statement("SELECT data, message_id FROM messages WHERE dialog_id = ?1 "
+                                 "AND notification_id < ?2 ORDER BY notification_id DESC LIMIT ?3"));
     TRY_RESULT(
         get_messages_fts_stmt,
         db_.get_statement("SELECT dialog_id, data, search_id FROM messages WHERE search_id IN (SELECT rowid FROM "
@@ -224,10 +243,12 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
 
     get_messages_stmt_.asc_stmt_ = std::move(get_messages_asc_stmt);
     get_messages_stmt_.desc_stmt_ = std::move(get_messages_desc_stmt);
+    get_messages_from_notification_id_stmt_ = std::move(get_messages_from_notification_id_stmt);
 
     get_messages_fts_stmt_ = std::move(get_messages_fts_stmt);
 
     // LOG(ERROR) << get_message_stmt_.explain().ok();
+    // LOG(ERROR) << get_messages_from_notification_id_stmt.explain().ok();
     // LOG(ERROR) << get_message_by_random_id_stmt_.explain().ok();
     // LOG(ERROR) << get_message_by_unique_message_id_stmt_.explain().ok();
 
@@ -243,7 +264,7 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
 
   Status add_message(FullMessageId full_message_id, ServerMessageId unique_message_id, UserId sender_user_id,
                      int64 random_id, int32 ttl_expires_at, int32 index_mask, int64 search_id, string text,
-                     BufferSlice data) override {
+                     NotificationId notification_id, BufferSlice data) override {
     LOG(INFO) << "Add " << full_message_id << " to database";
     auto dialog_id = full_message_id.get_dialog_id();
     auto message_id = full_message_id.get_message_id();
@@ -305,6 +326,11 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
       add_message_stmt_.bind_string(10, text).ensure();
     } else {
       add_message_stmt_.bind_null(10).ensure();
+    }
+    if (notification_id.is_valid()) {
+      add_message_stmt_.bind_int32(11, notification_id.get()).ensure();
+    } else {
+      add_message_stmt_.bind_null(11).ensure();
     }
 
     add_message_stmt_.step().ensure();
@@ -405,7 +431,7 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
                                                  MessageId last_message_id, int32 date) override {
     int64 left_message_id = first_message_id.get();
     int64 right_message_id = last_message_id.get();
-    CHECK(left_message_id <= right_message_id) << first_message_id << " " << last_message_id;
+    LOG_CHECK(left_message_id <= right_message_id) << first_message_id << " " << last_message_id;
     TRY_RESULT(first_messages,
                get_messages_inner(get_messages_stmt_.asc_stmt_, dialog_id.get(), left_message_id - 1, 1));
     if (!first_messages.empty()) {
@@ -465,8 +491,8 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     return Status::Error("Not found");
   }
 
-  Result<std::pair<std::vector<std::pair<DialogId, BufferSlice>>, int32>> get_expiring_messages(int32 expire_from,
-                                                                                                int32 expire_till,
+  Result<std::pair<std::vector<std::pair<DialogId, BufferSlice>>, int32>> get_expiring_messages(int32 expires_from,
+                                                                                                int32 expires_till,
                                                                                                 int32 limit) override {
     SCOPE_EXIT {
       get_expiring_messages_stmt_.reset();
@@ -475,9 +501,9 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
 
     std::vector<std::pair<DialogId, BufferSlice>> messages;
     // load messages
-    if (expire_from <= expire_till) {
-      get_expiring_messages_stmt_.bind_int32(1, expire_from).ensure();
-      get_expiring_messages_stmt_.bind_int32(2, expire_till).ensure();
+    if (expires_from <= expires_till) {
+      get_expiring_messages_stmt_.bind_int32(1, expires_from).ensure();
+      get_expiring_messages_stmt_.bind_int32(2, expires_till).ensure();
       get_expiring_messages_stmt_.step().ensure();
 
       while (get_expiring_messages_stmt_.has_row()) {
@@ -488,25 +514,47 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
       }
     }
 
-    // calc next expire_till
-    get_expiring_messages_helper_stmt_.bind_int32(1, expire_till).ensure();
+    // calc next expires_till
+    get_expiring_messages_helper_stmt_.bind_int32(1, expires_till).ensure();
     get_expiring_messages_helper_stmt_.bind_int32(2, limit).ensure();
     get_expiring_messages_helper_stmt_.step().ensure();
     CHECK(get_expiring_messages_helper_stmt_.has_row());
     int32 count = get_expiring_messages_helper_stmt_.view_int32(1);
-    int32 next_expire_till = -1;
+    int32 next_expires_till = -1;
     if (count != 0) {
-      next_expire_till = get_expiring_messages_helper_stmt_.view_int32(0);
+      next_expires_till = get_expiring_messages_helper_stmt_.view_int32(0);
     }
-    return std::make_pair(std::move(messages), next_expire_till);
+    return std::make_pair(std::move(messages), next_expires_till);
   }
 
-  Result<MessagesDbMessagesResult> get_messages(MessagesDbMessagesQuery query) override {
+  Result<std::vector<BufferSlice>> get_messages(MessagesDbMessagesQuery query) override {
     if (query.index_mask != 0) {
       return get_messages_from_index(query.dialog_id, query.from_message_id, query.index_mask, query.offset,
                                      query.limit);
     }
     return get_messages_impl(get_messages_stmt_, query.dialog_id, query.from_message_id, query.offset, query.limit);
+  }
+
+  Result<vector<BufferSlice>> get_messages_from_notification_id(DialogId dialog_id, NotificationId from_notification_id,
+                                                                int32 limit) override {
+    auto &stmt = get_messages_from_notification_id_stmt_;
+    SCOPE_EXIT {
+      stmt.reset();
+    };
+    stmt.bind_int64(1, dialog_id.get()).ensure();
+    stmt.bind_int32(2, from_notification_id.get()).ensure();
+    stmt.bind_int32(3, limit).ensure();
+
+    std::vector<BufferSlice> result;
+    stmt.step().ensure();
+    while (stmt.has_row()) {
+      auto data_slice = stmt.view_blob(0);
+      result.emplace_back(data_slice);
+      auto message_id = stmt.view_int64(1);
+      LOG(INFO) << "Load " << MessageId(message_id) << " in " << dialog_id << " from database";
+      stmt.step().ensure();
+    }
+    return std::move(result);
   }
 
   static string prepare_query(Slice query) {
@@ -522,7 +570,7 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     };
 
     const size_t MAX_QUERY_SIZE = 1024;
-    query.truncate(MAX_QUERY_SIZE);
+    query = utf8_truncate(query, MAX_QUERY_SIZE);
     auto buf = StackAllocator::alloc(query.size() * 4 + 100);
     StringBuilder sb(buf.as_slice());
     bool in_word{false};
@@ -530,7 +578,7 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     for (auto ptr = query.ubegin(), end = query.uend(); ptr < end;) {
       uint32 code;
       auto code_ptr = ptr;
-      ptr = next_utf8_unsafe(ptr, &code);
+      ptr = next_utf8_unsafe(ptr, &code, "prepare_query");
       if (is_word_character(code)) {
         if (!in_word) {
           in_word = true;
@@ -610,10 +658,10 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     return std::move(result);
   }
 
-  Result<MessagesDbMessagesResult> get_messages_from_index(DialogId dialog_id, MessageId from_message_id,
+  Result<std::vector<BufferSlice>> get_messages_from_index(DialogId dialog_id, MessageId from_message_id,
                                                            int32 index_mask, int32 offset, int32 limit) {
     CHECK(index_mask != 0);
-    CHECK(index_mask < (1 << MESSAGES_DB_INDEX_COUNT)) << tag("index_mask", index_mask);
+    LOG_CHECK(index_mask < (1 << MESSAGES_DB_INDEX_COUNT)) << tag("index_mask", index_mask);
     int index_i = -1;
     for (int i = 0; i < MESSAGES_DB_INDEX_COUNT; i++) {
       if (index_mask == (1 << i)) {
@@ -631,7 +679,7 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
 
   Result<MessagesDbCallsResult> get_calls(MessagesDbCallsQuery query) override {
     CHECK(query.index_mask != 0);
-    CHECK(query.index_mask < (1 << MESSAGES_DB_INDEX_COUNT)) << tag("index_mask", query.index_mask);
+    LOG_CHECK(query.index_mask < (1 << MESSAGES_DB_INDEX_COUNT)) << tag("index_mask", query.index_mask);
     int index_i = -1;
     for (int i = 0; i < MESSAGES_DB_INDEX_COUNT; i++) {
       if (query.index_mask == (1 << i)) {
@@ -697,16 +745,20 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     SqliteStatement desc_stmt_;
   };
   GetMessagesStmt get_messages_stmt_;
+  SqliteStatement get_messages_from_notification_id_stmt_;
 
   std::array<GetMessagesStmt, MESSAGES_DB_INDEX_COUNT> get_messages_from_index_stmts_;
   std::array<SqliteStatement, 2> get_calls_stmts_;
 
   SqliteStatement get_messages_fts_stmt_;
 
-  Result<MessagesDbMessagesResult> get_messages_impl(GetMessagesStmt &stmt, DialogId dialog_id,
+  Result<std::vector<BufferSlice>> get_messages_impl(GetMessagesStmt &stmt, DialogId dialog_id,
                                                      MessageId from_message_id, int32 offset, int32 limit) {
-    CHECK(dialog_id.is_valid()) << dialog_id;
+    LOG_CHECK(dialog_id.is_valid()) << dialog_id;
     CHECK(from_message_id.is_valid());
+
+    LOG(INFO) << "Loading messages in " << dialog_id << " from " << from_message_id << " with offset = " << offset
+              << " and limit = " << limit;
 
     auto message_id = from_message_id.get();
 
@@ -742,16 +794,16 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
       std::reverse(right.begin(), right.end());
     }
     if (left.empty()) {
-      return MessagesDbMessagesResult{std::move(right)};
+      return std::move(right);
     }
     if (right.empty()) {
-      return MessagesDbMessagesResult{std::move(left)};
+      return std::move(left);
     }
 
     right.reserve(right.size() + left.size());
     std::move(left.begin(), left.end(), std::back_inserter(right));
 
-    return MessagesDbMessagesResult{std::move(right)};
+    return std::move(right);
   }
 
   Result<std::vector<BufferSlice>> get_messages_inner(SqliteStatement &stmt, int64 dialog_id, int64 from_message_id,
@@ -763,13 +815,15 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     stmt.bind_int64(2, from_message_id).ensure();
     stmt.bind_int32(3, limit).ensure();
 
+    LOG(INFO) << "Begin to load " << limit << " messages in " << DialogId(dialog_id) << " from "
+              << MessageId(from_message_id) << " from database";
     std::vector<BufferSlice> result;
     stmt.step().ensure();
     while (stmt.has_row()) {
       auto data_slice = stmt.view_blob(0);
       result.emplace_back(data_slice);
       auto message_id = stmt.view_int64(1);
-      LOG(INFO) << "Load " << MessageId(message_id) << " in " << DialogId(dialog_id) << " from database";
+      LOG(INFO) << "Loaded " << MessageId(message_id) << " in " << DialogId(dialog_id) << " from database";
       stmt.step().ensure();
     }
     return std::move(result);
@@ -779,6 +833,10 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     LogEventParser message_date_parser(message.as_slice());
     int32 flags;
     td::parse(flags, message_date_parser);
+    int32 flags2 = 0;
+    if ((flags & (1 << 29)) != 0) {
+      td::parse(flags2, message_date_parser);
+    }
     bool has_sender = (flags >> 10) & 1;
     MessageId message_id;
     td::parse(message_id, message_date_parser);
@@ -788,7 +846,7 @@ class MessagesDbImpl : public MessagesDbSyncInterface {
     }
     int32 date;
     td::parse(date, message_date_parser);
-    LOG(INFO) << "Load " << message_id << " sent at " << date << " by " << sender_user_id;
+    LOG(INFO) << "Loaded " << message_id << " sent at " << date << " by " << sender_user_id;
     return std::make_tuple(message_id, date);
   }
 };
@@ -799,7 +857,7 @@ std::shared_ptr<MessagesDbSyncSafeInterface> create_messages_db_sync(
    public:
     explicit MessagesDbSyncSafe(std::shared_ptr<SqliteConnectionSafe> sqlite_connection)
         : lsls_db_([safe_connection = std::move(sqlite_connection)] {
-          return std::make_unique<MessagesDbImpl>(safe_connection->get().clone());
+          return make_unique<MessagesDbImpl>(safe_connection->get().clone());
         }) {
     }
     MessagesDbSyncInterface &get() override {
@@ -807,7 +865,7 @@ std::shared_ptr<MessagesDbSyncSafeInterface> create_messages_db_sync(
     }
 
    private:
-    LazySchedulerLocalStorage<std::unique_ptr<MessagesDbSyncInterface>> lsls_db_;
+    LazySchedulerLocalStorage<unique_ptr<MessagesDbSyncInterface>> lsls_db_;
   };
   return std::make_shared<MessagesDbSyncSafe>(std::move(sqlite_connection));
 }
@@ -820,9 +878,10 @@ class MessagesDbAsync : public MessagesDbAsyncInterface {
 
   void add_message(FullMessageId full_message_id, ServerMessageId unique_message_id, UserId sender_user_id,
                    int64 random_id, int32 ttl_expires_at, int32 index_mask, int64 search_id, string text,
-                   BufferSlice data, Promise<> promise) override {
+                   NotificationId notification_id, BufferSlice data, Promise<> promise) override {
     send_closure_later(impl_, &Impl::add_message, full_message_id, unique_message_id, sender_user_id, random_id,
-                       ttl_expires_at, index_mask, search_id, std::move(text), std::move(data), std::move(promise));
+                       ttl_expires_at, index_mask, search_id, std::move(text), notification_id, std::move(data),
+                       std::move(promise));
   }
 
   void delete_message(FullMessageId full_message_id, Promise<> promise) override {
@@ -851,8 +910,13 @@ class MessagesDbAsync : public MessagesDbAsyncInterface {
                        std::move(promise));
   }
 
-  void get_messages(MessagesDbMessagesQuery query, Promise<MessagesDbMessagesResult> promise) override {
+  void get_messages(MessagesDbMessagesQuery query, Promise<std::vector<BufferSlice>> promise) override {
     send_closure_later(impl_, &Impl::get_messages, std::move(query), std::move(promise));
+  }
+  void get_messages_from_notification_id(DialogId dialog_id, NotificationId from_notification_id, int32 limit,
+                                         Promise<vector<BufferSlice>> promise) override {
+    send_closure_later(impl_, &Impl::get_messages_from_notification_id, dialog_id, from_notification_id, limit,
+                       std::move(promise));
   }
   void get_calls(MessagesDbCallsQuery query, Promise<MessagesDbCallsResult> promise) override {
     send_closure_later(impl_, &Impl::get_calls, std::move(query), std::move(promise));
@@ -861,9 +925,9 @@ class MessagesDbAsync : public MessagesDbAsyncInterface {
     send_closure_later(impl_, &Impl::get_messages_fts, std::move(query), std::move(promise));
   }
   void get_expiring_messages(
-      int32 expire_from, int32 expire_till, int32 limit,
+      int32 expires_from, int32 expires_till, int32 limit,
       Promise<std::pair<std::vector<std::pair<DialogId, BufferSlice>>, int32>> promise) override {
-    send_closure_later(impl_, &Impl::get_expiring_messages, expire_from, expire_till, limit, std::move(promise));
+    send_closure_later(impl_, &Impl::get_expiring_messages, expires_from, expires_till, limit, std::move(promise));
   }
 
   void close(Promise<> promise) override {
@@ -881,11 +945,11 @@ class MessagesDbAsync : public MessagesDbAsyncInterface {
     }
     void add_message(FullMessageId full_message_id, ServerMessageId unique_message_id, UserId sender_user_id,
                      int64 random_id, int32 ttl_expires_at, int32 index_mask, int64 search_id, string text,
-                     BufferSlice data, Promise<> promise) {
+                     NotificationId notification_id, BufferSlice data, Promise<> promise) {
       add_write_query([=, promise = std::move(promise), data = std::move(data), text = std::move(text)](Unit) mutable {
         promise.set_result(sync_db_->add_message(full_message_id, unique_message_id, sender_user_id, random_id,
                                                  ttl_expires_at, index_mask, search_id, std::move(text),
-                                                 std::move(data)));
+                                                 notification_id, std::move(data)));
       });
     }
 
@@ -922,9 +986,14 @@ class MessagesDbAsync : public MessagesDbAsyncInterface {
       promise.set_result(sync_db_->get_dialog_message_by_date(dialog_id, first_message_id, last_message_id, date));
     }
 
-    void get_messages(MessagesDbMessagesQuery query, Promise<MessagesDbMessagesResult> promise) {
+    void get_messages(MessagesDbMessagesQuery query, Promise<std::vector<BufferSlice>> promise) {
       add_read_query();
       promise.set_result(sync_db_->get_messages(std::move(query)));
+    }
+    void get_messages_from_notification_id(DialogId dialog_id, NotificationId from_notification_id, int32 limit,
+                                           Promise<vector<BufferSlice>> promise) {
+      add_read_query();
+      promise.set_result(sync_db_->get_messages_from_notification_id(dialog_id, from_notification_id, limit));
     }
     void get_calls(MessagesDbCallsQuery query, Promise<MessagesDbCallsResult> promise) {
       add_read_query();
@@ -934,10 +1003,10 @@ class MessagesDbAsync : public MessagesDbAsyncInterface {
       add_read_query();
       promise.set_result(sync_db_->get_messages_fts(std::move(query)));
     }
-    void get_expiring_messages(int32 expire_from, int32 expire_till, int32 limit,
+    void get_expiring_messages(int32 expires_from, int32 expires_till, int32 limit,
                                Promise<std::pair<std::vector<std::pair<DialogId, BufferSlice>>, int32>> promise) {
       add_read_query();
-      promise.set_result(sync_db_->get_expiring_messages(expire_from, expire_till, limit));
+      promise.set_result(sync_db_->get_expiring_messages(expires_from, expires_till, limit));
     }
 
     void close(Promise<> promise) {
@@ -958,7 +1027,7 @@ class MessagesDbAsync : public MessagesDbAsyncInterface {
     MessagesDbSyncInterface *sync_db_ = nullptr;
 
     static constexpr size_t MAX_PENDING_QUERIES_COUNT{50};
-    static constexpr double MAX_PENDING_QUERIES_DELAY{1};
+    static constexpr double MAX_PENDING_QUERIES_DELAY{0.01};
     std::vector<Promise<>> pending_writes_;
     double wakeup_at_ = 0;
     template <class F>

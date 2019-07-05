@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -14,7 +14,6 @@
 
 #include <cstdint>
 #include <limits>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -34,13 +33,20 @@ std::pair<T, T> split(T s, char delimiter = ' ') {
 
 template <class T>
 vector<T> full_split(T s, char delimiter = ' ') {
-  T next;
   vector<T> result;
-  while (!s.empty()) {
-    std::tie(next, s) = split(s, delimiter);
-    result.push_back(next);
+  if (s.empty()) {
+    return result;
   }
-  return result;
+  while (true) {
+    auto delimiter_pos = s.find(delimiter);
+    if (delimiter_pos == string::npos) {
+      result.push_back(std::move(s));
+      return result;
+    } else {
+      result.push_back(s.substr(0, delimiter_pos));
+      s = s.substr(delimiter_pos + 1);
+    }
+  }
 }
 
 string implode(vector<string> v, char delimiter = ' ');
@@ -85,15 +91,32 @@ void reset_to_empty(T &value) {
 }
 
 template <class T>
-auto append(vector<T> &destination, const vector<T> &source) {
+void append(vector<T> &destination, const vector<T> &source) {
   destination.insert(destination.end(), source.begin(), source.end());
 }
 
 template <class T>
-auto append(vector<T> &destination, vector<T> &&source) {
+void append(vector<T> &destination, vector<T> &&source) {
   if (destination.empty()) {
     destination.swap(source);
     return;
+  }
+  destination.reserve(destination.size() + source.size());
+  for (auto &elem : source) {
+    destination.push_back(std::move(elem));
+  }
+  reset_to_empty(source);
+}
+
+template <class T>
+void combine(vector<T> &destination, const vector<T> &source) {
+  append(destination, source);
+}
+
+template <class T>
+void combine(vector<T> &destination, vector<T> &&source) {
+  if (destination.size() < source.size()) {
+    destination.swap(source);
   }
   destination.reserve(destination.size() + source.size());
   for (auto &elem : source) {
@@ -191,6 +214,8 @@ T trim(T str) {
   return T(begin, end);
 }
 
+string lpad0(string str, size_t size);
+
 string oneline(Slice str);
 
 template <class T>
@@ -205,7 +230,7 @@ std::enable_if_t<std::is_signed<T>::value, T> to_integer(Slice str) {
     begin++;
   }
   while (begin != end && is_digit(*begin)) {
-    integer_value = static_cast<unsigned_T>(integer_value * 10 + (*begin++ - '0'));
+    integer_value = static_cast<unsigned_T>(integer_value * 10 + static_cast<unsigned_T>(*begin++ - '0'));
   }
   if (integer_value > static_cast<unsigned_T>(std::numeric_limits<T>::max())) {
     static_assert(~0 + 1 == 0, "Two's complement");
@@ -227,7 +252,7 @@ std::enable_if_t<std::is_unsigned<T>::value, T> to_integer(Slice str) {
   auto begin = str.begin();
   auto end = str.end();
   while (begin != end && is_digit(*begin)) {
-    integer_value = static_cast<T>(integer_value * 10 + (*begin++ - '0'));
+    integer_value = static_cast<T>(integer_value * 10 + static_cast<T>(*begin++ - '0'));
   }
   return integer_value;
 }
@@ -314,8 +339,8 @@ class NarrowCast {
     static_assert(std::is_integral<AT>::value, "expected integral type to cast from");
 
     auto r = R(a);
-    CHECK(A(r) == a) << static_cast<AT>(a) << " " << static_cast<RT>(r) << " " << file_ << " " << line_;
-    CHECK((is_same_signedness<RT, AT>::value) || ((static_cast<RT>(r) < RT{}) == (static_cast<AT>(a) < AT{})))
+    LOG_CHECK(A(r) == a) << static_cast<AT>(a) << " " << static_cast<RT>(r) << " " << file_ << " " << line_;
+    LOG_CHECK((is_same_signedness<RT, AT>::value) || ((static_cast<RT>(r) < RT{}) == (static_cast<AT>(a) < AT{})))
         << static_cast<AT>(a) << " " << static_cast<RT>(r) << " " << file_ << " " << line_;
 
     return r;
@@ -349,5 +374,35 @@ bool is_aligned_pointer(const T *pointer) {
   static_assert(Alignment > 0 && (Alignment & (Alignment - 1)) == 0, "Wrong alignment");
   return (reinterpret_cast<std::uintptr_t>(static_cast<const void *>(pointer)) & (Alignment - 1)) == 0;
 }
+
+namespace detail {
+template <typename T>
+struct reversion_wrapper {
+  T &iterable;
+};
+
+template <typename T>
+auto begin(reversion_wrapper<T> w) {
+  return w.iterable.rbegin();
+}
+
+template <typename T>
+auto end(reversion_wrapper<T> w) {
+  return w.iterable.rend();
+}
+}  // namespace detail
+
+template <typename T>
+detail::reversion_wrapper<T> reversed(T &iterable) {
+  return {iterable};
+}
+
+string zero_encode(Slice data);
+
+string zero_decode(Slice data);
+
+string zero_one_encode(Slice data);
+
+string zero_one_decode(Slice data);
 
 }  // namespace td

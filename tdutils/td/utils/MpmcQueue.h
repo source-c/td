@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -95,7 +95,7 @@ class OneValue {
  private:
   enum Type : int { Empty = 0, Taken, Value };
   std::atomic<int> state_{Empty};
-  T value_;
+  T value_{};
 };
 
 template <class T>
@@ -199,7 +199,7 @@ class MpmcQueueOld {
     return "Mpmc queue (fetch and add array queue)";
   }
   MpmcQueueOld(size_t block_size, size_t threads_n) : block_size_{block_size}, hazard_pointers_{threads_n} {
-    auto node = std::make_unique<Node>(block_size_);
+    auto node = make_unique<Node>(block_size_);
     write_pos_ = node.get();
     read_pos_ = node.get();
     node.release();
@@ -306,9 +306,9 @@ class MpmcQueueOld {
     MpmcQueueBlock<T> block;
     //Got pad in MpmcQueueBlock
   };
-  std::atomic<Node *> write_pos_;
+  std::atomic<Node *> write_pos_{nullptr};
   char pad[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
-  std::atomic<Node *> read_pos_;
+  std::atomic<Node *> read_pos_{nullptr};
   char pad2[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
   size_t block_size_;
   HazardPointers<Node, 1> hazard_pointers_;
@@ -324,7 +324,7 @@ class MpmcQueue {
     return "NEW Mpmc queue (fetch and add array queue)";
   }
   MpmcQueue(size_t block_size, size_t threads_n) : hazard_pointers_{threads_n} {
-    auto node = std::make_unique<Node>();
+    auto node = make_unique<Node>();
     write_pos_ = node.get();
     read_pos_ = node.get();
     node.release();
@@ -438,9 +438,9 @@ class MpmcQueue {
     char pad[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
     //Got pad in MpmcQueueBlock
   };
-  std::atomic<Node *> write_pos_;
+  std::atomic<Node *> write_pos_{nullptr};
   char pad[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
-  std::atomic<Node *> read_pos_;
+  std::atomic<Node *> read_pos_{nullptr};
   char pad2[TD_CONCURRENCY_PAD - sizeof(std::atomic<Node *>)];
   HazardPointers<Node, 1> hazard_pointers_;
   //Got pad in HazardPointers

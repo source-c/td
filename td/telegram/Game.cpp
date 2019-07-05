@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,7 +11,9 @@
 
 #include "td/telegram/AnimationsManager.h"
 #include "td/telegram/ContactsManager.h"
+#include "td/telegram/Document.h"
 #include "td/telegram/DocumentsManager.h"
+#include "td/telegram/misc.h"
 #include "td/telegram/Photo.h"
 #include "td/telegram/Td.h"
 
@@ -41,21 +43,10 @@ Game::Game(Td *td, string title, string description, tl_object_ptr<telegram_api:
     if (document_id == telegram_api::document::ID) {
       auto parsed_document =
           td->documents_manager_->on_get_document(move_tl_object_as<telegram_api::document>(document), owner_dialog_id);
-      switch (parsed_document.first) {
-        case DocumentsManager::DocumentType::Animation:
-          animation_file_id_ = parsed_document.second;
-          break;
-        case DocumentsManager::DocumentType::Audio:
-        case DocumentsManager::DocumentType::General:
-        case DocumentsManager::DocumentType::Sticker:
-        case DocumentsManager::DocumentType::Video:
-        case DocumentsManager::DocumentType::VideoNote:
-        case DocumentsManager::DocumentType::VoiceNote:
-        case DocumentsManager::DocumentType::Unknown:
-          LOG(ERROR) << "Receive non-animation document in the game";
-          break;
-        default:
-          UNREACHABLE();
+      if (parsed_document.type == Document::Type::Animation) {
+        animation_file_id_ = parsed_document.file_id;
+      } else {
+        LOG(ERROR) << "Receive non-animation document in the game";
       }
     }
   }
@@ -83,15 +74,27 @@ UserId Game::get_bot_user_id() const {
   return bot_user_id_;
 }
 
-void Game::set_message_text(FormattedText &&text) {
+vector<FileId> Game::get_file_ids(const Td *td) const {
+  auto result = photo_get_file_ids(photo_);
+  if (animation_file_id_.is_valid()) {
+    result.push_back(animation_file_id_);
+    auto thumbnail_file_id = td->animations_manager_->get_animation_thumbnail_file_id(animation_file_id_);
+    if (thumbnail_file_id.is_valid()) {
+      result.push_back(thumbnail_file_id);
+    }
+  }
+  return result;
+}
+
+void Game::set_text(FormattedText &&text) {
   text_ = std::move(text);
 }
 
-const FormattedText &Game::get_message_text() const {
+const FormattedText &Game::get_text() const {
   return text_;
 }
 
-tl_object_ptr<td_api::game> Game::get_game_object(const Td *td) const {
+tl_object_ptr<td_api::game> Game::get_game_object(Td *td) const {
   return make_tl_object<td_api::game>(
       id_, short_name_, title_, get_formatted_text_object(text_), description_,
       get_photo_object(td->file_manager_.get(), &photo_),
@@ -120,6 +123,29 @@ StringBuilder &operator<<(StringBuilder &string_builder, const Game &game) {
                         << ", bot = " << game.bot_user_id_ << ", short_name = " << game.short_name_
                         << ", title = " << game.title_ << ", description = " << game.description_
                         << ", photo = " << game.photo_ << ", animation_file_id = " << game.animation_file_id_ << "]";
+}
+
+Result<Game> process_input_message_game(const ContactsManager *contacts_manager,
+                                        tl_object_ptr<td_api::InputMessageContent> &&input_message_content) {
+  CHECK(input_message_content != nullptr);
+  CHECK(input_message_content->get_id() == td_api::inputMessageGame::ID);
+  auto input_message_game = move_tl_object_as<td_api::inputMessageGame>(input_message_content);
+
+  UserId bot_user_id(input_message_game->bot_user_id_);
+  if (!contacts_manager->have_input_user(bot_user_id)) {
+    return Status::Error(400, "Game owner bot is not accessible");
+  }
+
+  if (!clean_input_string(input_message_game->game_short_name_)) {
+    return Status::Error(400, "Game short name must be encoded in UTF-8");
+  }
+
+  // TODO validate game_short_name
+  if (input_message_game->game_short_name_.empty()) {
+    return Status::Error(400, "Game short name must be non-empty");
+  }
+
+  return Game(bot_user_id, std::move(input_message_game->game_short_name_));
 }
 
 }  // namespace td

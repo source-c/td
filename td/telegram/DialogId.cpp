@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -61,14 +61,14 @@ ChatId DialogId::get_chat_id() const {
   return ChatId(static_cast<int32>(-id));
 }
 
-SecretChatId DialogId::get_secret_chat_id() const {
-  CHECK(get_type() == DialogType::SecretChat);
-  return SecretChatId(static_cast<int32>(id - ZERO_SECRET_ID));
-}
-
 ChannelId DialogId::get_channel_id() const {
   CHECK(get_type() == DialogType::Channel);
   return ChannelId(static_cast<int32>(MAX_CHANNEL_ID - id));
+}
+
+SecretChatId DialogId::get_secret_chat_id() const {
+  CHECK(get_type() == DialogType::SecretChat);
+  return SecretChatId(static_cast<int32>(id - ZERO_SECRET_ID));
 }
 
 DialogId::DialogId(UserId user_id) {

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -42,11 +42,11 @@
 #endif
 // clang-format on
 
+#include "td/utils/check.h"
 #include "td/utils/int_types.h"
+#include "td/utils/unique_ptr.h"
 
-#include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #define TD_DEBUG
@@ -99,11 +99,6 @@ using string = std::string;
 template <class ValueT>
 using vector = std::vector<ValueT>;
 
-template <class ValueT>
-using unique_ptr = std::unique_ptr<ValueT>;
-
-using std::make_unique;
-
 struct Unit {};
 
 struct Auto {
@@ -112,15 +107,5 @@ struct Auto {
     return ToT();
   }
 };
-
-template <class ToT, class FromT>
-ToT &as(FromT *from) {
-  return *reinterpret_cast<ToT *>(from);
-}
-
-template <class ToT, class FromT>
-const ToT &as(const FromT *from) {
-  return *reinterpret_cast<const ToT *>(from);
-}
 
 }  // namespace td

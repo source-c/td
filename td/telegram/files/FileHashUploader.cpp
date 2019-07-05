@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,21 +8,24 @@
 
 #include "td/telegram/telegram_api.h"
 
+#include "td/telegram/files/FileType.h"
 #include "td/telegram/Global.h"
 #include "td/telegram/net/DcId.h"
 #include "td/telegram/net/NetQueryDispatcher.h"
 
 #include "td/utils/buffer.h"
+#include "td/utils/common.h"
 #include "td/utils/crypto.h"
 #include "td/utils/logging.h"
 #include "td/utils/MimeType.h"
 #include "td/utils/misc.h"
 #include "td/utils/PathView.h"
-#include "td/utils/port/Fd.h"
 #include "td/utils/port/FileFd.h"
+#include "td/utils/port/PollFlags.h"
 #include "td/utils/Status.h"
 
 namespace td {
+
 void FileHashUploader::start_up() {
   auto status = init();
   if (status.is_error()) {
@@ -31,6 +34,7 @@ void FileHashUploader::start_up() {
     return;
   }
 }
+
 Status FileHashUploader::init() {
   TRY_RESULT(fd, FileFd::open(local_.path_, FileFd::Read));
   if (fd.get_size() != size_) {
@@ -43,6 +47,7 @@ Status FileHashUploader::init() {
   resource_state_.update_estimated_limit(size_);
   return Status::OK();
 }
+
 void FileHashUploader::loop() {
   if (stop_flag_) {
     return;
@@ -85,7 +90,7 @@ Status FileHashUploader::loop_sha() {
   }
   resource_state_.start_use(limit);
 
-  fd_.update_flags(Fd::Flag::Read);
+  fd_.get_poll_info().add_flags(PollFlags::Read());
   TRY_RESULT(read_size, fd_.flush_read(static_cast<size_t>(limit)));
   if (read_size != static_cast<size_t>(limit)) {
     return Status::Error("unexpected end of file");
@@ -129,8 +134,12 @@ Status FileHashUploader::on_result_impl(NetQueryPtr net_query) {
       return Status::Error("Document is not found by hash");
     case telegram_api::document::ID: {
       auto document = move_tl_object_as<telegram_api::document>(res);
+      if (!DcId::is_valid(document->dc_id_)) {
+        return Status::Error("Found document has invalid DcId");
+      }
       callback_->on_ok(FullRemoteFileLocation(FileType::Document, document->id_, document->access_hash_,
-                                              DcId::internal(document->dc_id_)));
+                                              DcId::internal(document->dc_id_),
+                                              document->file_reference_.as_slice().str()));
 
       stop_flag_ = true;
       return Status::OK();
@@ -140,4 +149,5 @@ Status FileHashUploader::on_result_impl(NetQueryPtr net_query) {
       return Status::Error("UNREACHABLE");
   }
 }
+
 }  // namespace td

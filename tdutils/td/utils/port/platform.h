@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,7 +9,7 @@
 // clang-format off
 
 /*** Platform macros ***/
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(_WINDOWS) // _WINDOWS is defined by CMake
   #if defined(__cplusplus_winrt)
     #define TD_WINRT 1
   #endif
@@ -20,7 +20,7 @@
 #elif defined(__APPLE__)
   #include "TargetConditionals.h"
   #if TARGET_OS_IPHONE
-    // iOS/Apple Watch OS/Apple TV OS
+    // iOS/watchOS/tvOS
     #if TARGET_OS_IOS
       #define TD_DARWIN_IOS 1
     #elif TARGET_OS_TV
@@ -31,7 +31,7 @@
       #warning "Probably unsupported Apple iPhone platform. Feel free to try to compile"
     #endif
   #elif TARGET_OS_MAC
-    // Other kinds of Mac OS
+    // Other kinds of macOS
     #define TD_DARWIN_MAC 1
   #else
     #warning "Probably unsupported Apple platform. Feel free to try to compile"
@@ -43,6 +43,8 @@
   #define TD_TIZEN 1
 #elif defined(__linux__)
   #define TD_LINUX 1
+#elif defined(__FreeBSD__)
+  #define TD_FREEBSD 1
 #elif defined(__CYGWIN__)
   #define TD_CYGWIN 1
 #elif defined(__EMSCRIPTEN__)

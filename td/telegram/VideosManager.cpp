@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,9 +11,7 @@
 #include "td/telegram/telegram_api.h"
 
 #include "td/telegram/AuthManager.h"
-#include "td/telegram/DocumentsManager.h"
 #include "td/telegram/files/FileManager.h"
-#include "td/telegram/Global.h"
 #include "td/telegram/Td.h"
 
 #include "td/utils/logging.h"
@@ -25,10 +23,10 @@ namespace td {
 VideosManager::VideosManager(Td *td) : td_(td) {
 }
 
-int32 VideosManager::get_video_duration(FileId file_id) {
-  auto &video = videos_[file_id];
-  CHECK(video != nullptr);
-  return video->duration;
+int32 VideosManager::get_video_duration(FileId file_id) const {
+  auto it = videos_.find(file_id);
+  CHECK(it != videos_.end());
+  return it->second->duration;
 }
 
 tl_object_ptr<td_api::video> VideosManager::get_video_object(FileId file_id) {
@@ -46,7 +44,7 @@ tl_object_ptr<td_api::video> VideosManager::get_video_object(FileId file_id) {
       get_photo_size_object(td_->file_manager_.get(), &video->thumbnail), td_->file_manager_->get_file_object(file_id));
 }
 
-FileId VideosManager::on_get_video(std::unique_ptr<Video> new_video, bool replace) {
+FileId VideosManager::on_get_video(unique_ptr<Video> new_video, bool replace) {
   auto file_id = new_video->file_id;
   LOG(INFO) << "Receive video " << file_id;
   auto &v = videos_[file_id];
@@ -121,7 +119,7 @@ FileId VideosManager::dup_video(FileId new_id, FileId old_id) {
   CHECK(old_video != nullptr);
   auto &new_video = videos_[new_id];
   CHECK(!new_video);
-  new_video = std::make_unique<Video>(*old_video);
+  new_video = make_unique<Video>(*old_video);
   new_video->file_id = new_id;
   new_video->thumbnail.file_id = td_->file_manager_->dup_file_id(new_video->thumbnail.file_id);
   return new_id;
@@ -224,7 +222,7 @@ tl_object_ptr<telegram_api::InputMedia> VideosManager::get_input_media(
   if (file_view.is_encrypted()) {
     return nullptr;
   }
-  if (file_view.has_remote_location() && !file_view.remote_location().is_web()) {
+  if (file_view.has_remote_location() && !file_view.remote_location().is_web() && input_file == nullptr) {
     int32 flags = 0;
     if (ttl != 0) {
       flags |= telegram_api::inputMediaDocument::TTL_SECONDS_MASK;
@@ -239,7 +237,6 @@ tl_object_ptr<telegram_api::InputMedia> VideosManager::get_input_media(
     }
     return make_tl_object<telegram_api::inputMediaDocumentExternal>(flags, file_view.url(), ttl);
   }
-  CHECK(!file_view.has_remote_location());
 
   if (input_file != nullptr) {
     const Video *video = get_video(file_id);
@@ -279,6 +276,8 @@ tl_object_ptr<telegram_api::InputMedia> VideosManager::get_input_media(
     return make_tl_object<telegram_api::inputMediaUploadedDocument>(
         flags, false /*ignored*/, std::move(input_file), std::move(input_thumbnail), mime_type, std::move(attributes),
         std::move(added_stickers), ttl);
+  } else {
+    CHECK(!file_view.has_remote_location());
   }
 
   return nullptr;

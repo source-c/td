@@ -1,16 +1,17 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
-#include "td/utils/int_types.h"
+#include "td/utils/common.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/Slice.h"
 #include "td/utils/StorerBase.h"
+#include "td/utils/UInt.h"
 
 #include <cstring>
 
@@ -29,13 +30,12 @@ class TlStorerUnsafe {
 
   template <class T>
   void store_binary(const T &x) {
-    std::memcpy(buf_, reinterpret_cast<const unsigned char *>(&x), sizeof(T));
+    std::memcpy(buf_, &x, sizeof(T));
     buf_ += sizeof(T);
   }
 
   void store_int(int32 x) {
-    *reinterpret_cast<int32 *>(buf_) = x;
-    buf_ += sizeof(int32);
+    store_binary<int32>(x);
   }
 
   void store_long(int64 x) {
@@ -222,25 +222,29 @@ class TlStorerToString {
     result.append("bytes [");
     store_long(static_cast<int64>(value.size()));
     result.append("] { ");
-    for (size_t i = 0; i < value.size(); i++) {
+    size_t len = min(static_cast<size_t>(64), value.size());
+    for (size_t i = 0; i < len; i++) {
       int b = value[static_cast<int>(i)] & 0xff;
       result += hex[b >> 4];
       result += hex[b & 15];
       result += ' ';
     }
-    result.append("}");
+    if (len < value.size()) {
+      result.append("...");
+    }
+    result += '}';
     store_field_end();
   }
 
   void store_field(const char *name, const UInt128 &value) {
     store_field_begin(name);
-    store_binary(Slice(reinterpret_cast<const unsigned char *>(&value), sizeof(value)));
+    store_binary(as_slice(value));
     store_field_end();
   }
 
   void store_field(const char *name, const UInt256 &value) {
     store_field_begin(name);
-    store_binary(Slice(reinterpret_cast<const unsigned char *>(&value), sizeof(value)));
+    store_binary(as_slice(value));
     store_field_end();
   }
 

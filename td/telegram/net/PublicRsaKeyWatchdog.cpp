@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,8 +8,11 @@
 
 #include "td/telegram/Global.h"
 #include "td/telegram/net/DcId.h"
+#include "td/telegram/TdDb.h"
 
 #include "td/telegram/telegram_api.h"
+
+#include "td/mtproto/crypto.h"
 
 #include "td/utils/logging.h"
 #include "td/utils/Time.h"
@@ -33,7 +36,7 @@ void PublicRsaKeyWatchdog::add_public_rsa_key(std::shared_ptr<PublicRsaKeyShared
     ActorId<PublicRsaKeyWatchdog> parent_;
   };
 
-  key->add_listener(std::make_unique<Listener>(actor_id(this)));
+  key->add_listener(make_unique<Listener>(actor_id(this)));
   sync_key(key);
   keys_.push_back(std::move(key));
   loop();
@@ -76,7 +79,7 @@ void PublicRsaKeyWatchdog::on_result(NetQueryPtr net_query) {
   has_query_ = false;
   yield();
   if (net_query->is_error()) {
-    LOG(ERROR) << "getCdnConfig error " << net_query->move_as_error();
+    LOG(ERROR) << "Receive error for getCdnConfig: " << net_query->move_as_error();
     return;
   }
 

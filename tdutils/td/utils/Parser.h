@@ -1,11 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
+#include "td/utils/common.h"
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/Slice.h"
@@ -50,7 +51,7 @@ class Parser {
     if (status_.is_error()) {
       return MutableSlice();
     }
-    char *till = reinterpret_cast<char *>(std::memchr(ptr_, c, end_ - ptr_));
+    char *till = static_cast<char *>(std::memchr(ptr_, c, end_ - ptr_));
     if (till == nullptr) {
       till = end_;
     }
@@ -65,7 +66,7 @@ class Parser {
     }
     char *best_till = end_;
     for (auto c : str) {
-      char *till = reinterpret_cast<char *>(std::memchr(ptr_, c, end_ - ptr_));
+      char *till = static_cast<char *>(std::memchr(ptr_, c, end_ - ptr_));
       if (till != nullptr && till < best_till) {
         best_till = till;
       }
@@ -145,6 +146,10 @@ class Parser {
   }
   void skip_whitespaces() {
     skip_till_not(" \t\r\n");
+  }
+  MutableSlice read_word() {
+    skip_whitespaces();
+    return read_till_nofail(" \t\r\n");
   }
 
   MutableSlice data() const {

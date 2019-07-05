@@ -1,22 +1,23 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
+#include "td/telegram/net/AuthDataShared.h"
+#include "td/telegram/net/NetQuery.h"
+#include "td/telegram/net/TempAuthKeyWatchdog.h"
+#include "td/telegram/StateManager.h"
+
 #include "td/mtproto/AuthData.h"
+#include "td/mtproto/AuthKey.h"
 #include "td/mtproto/Handshake.h"
 #include "td/mtproto/SessionConnection.h"
 
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
-
-#include "td/telegram/net/AuthDataShared.h"
-#include "td/telegram/net/NetQuery.h"
-#include "td/telegram/net/TempAuthKeyWatchdog.h"
-#include "td/telegram/StateManager.h"
 
 #include "td/utils/buffer.h"
 #include "td/utils/common.h"
@@ -54,15 +55,16 @@ class Session final
     virtual ~Callback() = default;
     virtual void on_failed() = 0;
     virtual void on_closed() = 0;
-    virtual void request_raw_connection(Promise<std::unique_ptr<mtproto::RawConnection>>) = 0;
+    virtual void request_raw_connection(Promise<unique_ptr<mtproto::RawConnection>>) = 0;
     virtual void on_tmp_auth_key_updated(mtproto::AuthKey auth_key) = 0;
     virtual void on_server_salt_updated(std::vector<mtproto::ServerSalt> server_salts) {
     }
     // one still have to call close after on_closed
+    virtual void on_result(NetQueryPtr net_query) = 0;
   };
 
   Session(unique_ptr<Callback> callback, std::shared_ptr<AuthDataShared> shared_auth_data, int32 dc_id, bool is_main,
-          bool use_pfs, bool is_cdn, const mtproto::AuthKey &tmp_auth_key,
+          bool use_pfs, bool is_cdn, bool need_destroy, const mtproto::AuthKey &tmp_auth_key,
           std::vector<mtproto::ServerSalt> server_salts);
   void send(NetQueryPtr &&query);
   void on_network(bool network_flag, uint32 network_generation);
@@ -91,16 +93,17 @@ class Session final
     }
   };
 
-  // When connection is closed, mark all queries without ack as unknown
+  // When connection is closed, mark all queries without ack as unknown.
   // Ask state of all unknown queries when new connection is created.
   //
   // Just re-ask answer_id each time we get information about it.
-  // Thought mtproto::Connection must ensure delivery of such query
+  // Though mtproto::Connection must ensure delivery of such query.
 
   int32 dc_id_;
   enum class Mode : int8 { Tcp, Http } mode_ = Mode::Tcp;
   bool is_main_;
   bool is_cdn_;
+  bool need_destroy_;
   bool was_on_network_ = false;
   bool network_flag_ = false;
   uint32 network_generation_ = 0;
@@ -114,7 +117,7 @@ class Session final
   std::unordered_set<uint64> unknown_queries_;
   std::vector<int64> to_cancel_;
 
-  // Do not invalidate iterators of this two containers!
+  // Do not invalidate iterators of these two containers!
   // TODO: better data structures
   std::deque<NetQueryPtr> pending_queries_;
   std::map<uint64, Query> sent_queries_;
@@ -135,11 +138,10 @@ class Session final
   ConnectionInfo *current_info_;
   ConnectionInfo main_connection_;
   ConnectionInfo long_poll_connection_;
-  bool auth_lost_flag_ = false;
   StateManager::ConnectionToken connection_token_;
 
   double cached_connection_timestamp_ = 0;
-  std::unique_ptr<mtproto::RawConnection> cached_connection_;
+  unique_ptr<mtproto::RawConnection> cached_connection_;
 
   std::shared_ptr<Callback> callback_;
   mtproto::AuthData auth_data_;
@@ -159,13 +161,13 @@ class Session final
   struct HandshakeInfo {
     bool flag_ = false;
     ActorOwn<detail::GenAuthKeyActor> actor_;
-    std::unique_ptr<mtproto::AuthKeyHandshake> handshake_;
+    unique_ptr<mtproto::AuthKeyHandshake> handshake_;
   };
   enum HandshakeId : int32 { MainAuthKeyHandshake = 0, TmpAuthKeyHandshake = 1 };
   std::array<HandshakeInfo, 2> handshake_info_;
 
   double wakeup_at_;
-  void on_handshake_ready(Result<std::unique_ptr<mtproto::AuthKeyHandshake>> r_handshake);
+  void on_handshake_ready(Result<unique_ptr<mtproto::AuthKeyHandshake>> r_handshake);
   void create_gen_auth_key_actor(HandshakeId handshake_id);
   void auth_loop();
 
@@ -193,6 +195,8 @@ class Session final
 
   void on_message_info(uint64 id, int32 state, uint64 answer_id, int32 answer_size) override;
 
+  Status on_destroy_auth_key() override;
+
   void flush_pending_invoke_after_queries();
   bool has_queries() const;
 
@@ -211,16 +215,17 @@ class Session final
   void resend_query(NetQueryPtr query);
 
   void connection_open(ConnectionInfo *info, bool ask_info = false);
-  void connection_add(std::unique_ptr<mtproto::RawConnection> raw_connection);
+  void connection_add(unique_ptr<mtproto::RawConnection> raw_connection);
   void connection_check_mode(ConnectionInfo *info);
-  void connection_open_finish(ConnectionInfo *info, Result<std::unique_ptr<mtproto::RawConnection>> r_raw_connection);
+  void connection_open_finish(ConnectionInfo *info, Result<unique_ptr<mtproto::RawConnection>> r_raw_connection);
 
   void connection_online_update(bool force = false);
   void connection_close(ConnectionInfo *info);
   void connection_flush(ConnectionInfo *info);
   void connection_send_query(ConnectionInfo *info, NetQueryPtr &&net_query, uint64 message_id = 0);
-  bool need_send_bind_key();
-  bool need_send_query();
+  bool need_send_bind_key() const;
+  bool need_send_query() const;
+  bool can_destroy_auth_key() const;
   bool connection_send_bind_key(ConnectionInfo *info);
 
   void on_result(NetQueryPtr query) override;

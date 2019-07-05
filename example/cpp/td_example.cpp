@@ -1,11 +1,10 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include <td/telegram/Client.h>
-#include <td/telegram/Log.h>
 #include <td/telegram/td_api.h>
 #include <td/telegram/td_api.hpp>
 
@@ -14,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -53,7 +53,7 @@ namespace td_api = td::td_api;
 class TdExample {
  public:
   TdExample() {
-    td::Log::set_verbosity_level(1);
+    td::Client::execute({0, td_api::make_object<td_api::setLogVerbosityLevel>(1)});
     client_ = std::make_unique<td::Client>();
   }
 
@@ -65,7 +65,7 @@ class TdExample {
         process_response(client_->receive(10));
       } else {
         std::cerr << "Enter action [q] quit [u] check for updates and request results [c] show chats [m <id> <text>] "
-                     "send message [l] logout: "
+                     "send message [me] show self [l] logout: "
                   << std::endl;
         std::string line;
         std::getline(std::cin, line);
@@ -87,6 +87,12 @@ class TdExample {
               break;
             }
           }
+        } else if (action == "close") {
+          std::cerr << "Closing..." << std::endl;
+          send_query(td_api::make_object<td_api::close>(), {});
+        } else if (action == "me") {
+          send_query(td_api::make_object<td_api::getMe>(),
+                     [this](Object object) { std::cerr << to_string(object) << std::endl; });
         } else if (action == "l") {
           std::cerr << "Logging out..." << std::endl;
           send_query(td_api::make_object<td_api::logOut>(), {});

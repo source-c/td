@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -23,8 +23,8 @@ class BinlogEventsProcessor {
   template <class CallbackT>
   void for_each(CallbackT &&callback) {
     for (size_t i = 0; i < ids_.size(); i++) {
-      CHECK(i == 0 || ids_[i - 1] < ids_[i]) << ids_[i - 1] << " " << events_[i - 1].public_to_string() << " "
-                                             << ids_[i] << " " << events_[i].public_to_string();
+      LOG_CHECK(i == 0 || ids_[i - 1] < ids_[i]) << ids_[i - 1] << " " << events_[i - 1].public_to_string() << " "
+                                                 << ids_[i] << " " << events_[i].public_to_string();
       if ((ids_[i] & 1) == 0) {
         callback(events_[i]);
       }

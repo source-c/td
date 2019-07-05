@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -13,11 +13,13 @@
 #include "td/utils/misc.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
+#include "td/utils/UInt.h"
 #include "td/utils/utf8.h"
 
 #include <array>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 
 namespace td {
@@ -29,7 +31,7 @@ class TlParser {
   size_t error_pos = std::numeric_limits<size_t>::max();
   std::string error;
 
-  unique_ptr<int32[]> data_buf;
+  std::unique_ptr<int32[]> data_buf;
   static constexpr size_t SMALL_DATA_ARRAY_SIZE = 6;
   std::array<int32, SMALL_DATA_ARRAY_SIZE> small_data_array;
 
@@ -37,11 +39,6 @@ class TlParser {
 
  public:
   explicit TlParser(Slice slice) {
-    if (slice.size() % sizeof(int32) != 0) {
-      set_error("Wrong length");
-      return;
-    }
-
     data_len = left_len = slice.size();
     if (is_aligned_pointer<4>(slice.begin())) {
       data = slice.ubegin();
@@ -51,10 +48,10 @@ class TlParser {
         buf = &small_data_array[0];
       } else {
         LOG(ERROR) << "Unexpected big unaligned data pointer of length " << slice.size() << " at " << slice.begin();
-        data_buf = make_unique<int32[]>(data_len / sizeof(int32));
+        data_buf = std::make_unique<int32[]>(1 + data_len / sizeof(int32));
         buf = data_buf.get();
       }
-      std::memcpy(static_cast<void *>(buf), static_cast<const void *>(slice.begin()), slice.size());
+      std::memcpy(buf, slice.begin(), slice.size());
       data = reinterpret_cast<unsigned char *>(buf);
     }
   }
@@ -91,7 +88,8 @@ class TlParser {
   }
 
   int32 fetch_int_unsafe() {
-    int32 result = *reinterpret_cast<const int32 *>(data);
+    int32 result;
+    std::memcpy(&result, data, sizeof(int32));
     data += sizeof(int32);
     return result;
   }
@@ -103,7 +101,7 @@ class TlParser {
 
   int64 fetch_long_unsafe() {
     int64 result;
-    std::memcpy(reinterpret_cast<unsigned char *>(&result), data, sizeof(int64));
+    std::memcpy(&result, data, sizeof(int64));
     data += sizeof(int64);
     return result;
   }
@@ -115,7 +113,7 @@ class TlParser {
 
   double fetch_double_unsafe() {
     double result;
-    std::memcpy(reinterpret_cast<unsigned char *>(&result), data, sizeof(double));
+    std::memcpy(&result, data, sizeof(double));
     data += sizeof(double);
     return result;
   }
@@ -128,7 +126,7 @@ class TlParser {
   template <class T>
   T fetch_binary_unsafe() {
     T result;
-    std::memcpy(reinterpret_cast<unsigned char *>(&result), data, sizeof(T));
+    std::memcpy(&result, data, sizeof(T));
     data += sizeof(T);
     return result;
   }
@@ -136,7 +134,7 @@ class TlParser {
   template <class T>
   T fetch_binary() {
     static_assert(sizeof(T) <= sizeof(empty_data), "too big fetch_binary");
-    static_assert(sizeof(T) % sizeof(int32) == 0, "wrong call to fetch_binary");
+    //static_assert(sizeof(T) % sizeof(int32) == 0, "wrong call to fetch_binary");
     check_len(sizeof(T));
     return fetch_binary_unsafe<T>();
   }
@@ -165,7 +163,7 @@ class TlParser {
 
   template <class T>
   T fetch_string_raw(const size_t size) {
-    CHECK(size % sizeof(int32) == 0);
+    //CHECK(size % sizeof(int32) == 0);
     check_len(size);
     const char *result = reinterpret_cast<const char *>(data);
     data += size;

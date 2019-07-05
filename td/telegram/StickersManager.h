@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -12,6 +12,7 @@
 #include "td/actor/Timeout.h"
 
 #include "td/telegram/files/FileId.h"
+#include "td/telegram/files/FileSourceId.h"
 #include "td/telegram/Photo.h"
 #include "td/telegram/SecretInputMedia.h"
 
@@ -30,24 +31,23 @@
 #include <utility>
 
 namespace td {
-class MultiPromiseActor;
-class Td;
-}  // namespace td
 
-namespace td {
+class Td;
 
 class StickersManager : public Actor {
  public:
+  static constexpr int64 GREAT_MINDS_SET_ID = 1842540969984001;
+
   StickersManager(Td *td, ActorShared<> parent);
 
-  tl_object_ptr<td_api::sticker> get_sticker_object(FileId file_id);
+  tl_object_ptr<td_api::sticker> get_sticker_object(FileId file_id) const;
 
-  tl_object_ptr<td_api::stickers> get_stickers_object(const vector<FileId> &sticker_ids);
+  tl_object_ptr<td_api::stickers> get_stickers_object(const vector<FileId> &sticker_ids) const;
 
-  tl_object_ptr<td_api::stickerSet> get_sticker_set_object(int64 sticker_set_id);
+  tl_object_ptr<td_api::stickerSet> get_sticker_set_object(int64 sticker_set_id) const;
 
   tl_object_ptr<td_api::stickerSets> get_sticker_sets_object(int32 total_count, const vector<int64> &sticker_set_ids,
-                                                             size_t covers_limit);
+                                                             size_t covers_limit) const;
 
   tl_object_ptr<telegram_api::InputStickerSet> get_input_sticker_set(int64 sticker_set_id) const;
 
@@ -147,9 +147,12 @@ class StickersManager : public Actor {
 
   vector<FileId> get_recent_stickers(bool is_attached, Promise<Unit> &&promise);
 
-  void on_get_recent_stickers(bool is_attached, tl_object_ptr<telegram_api::messages_RecentStickers> &&stickers_ptr);
+  void on_get_recent_stickers(bool is_repair, bool is_attached,
+                              tl_object_ptr<telegram_api::messages_RecentStickers> &&stickers_ptr);
 
-  void on_get_recent_stickers_failed(bool is_attached, Status error);
+  void on_get_recent_stickers_failed(bool is_repair, bool is_attached, Status error);
+
+  FileSourceId get_recent_stickers_file_source_id(int is_attached);
 
   void add_recent_sticker(bool is_attached, const tl_object_ptr<td_api::InputFile> &input_file,
                           Promise<Unit> &&promise);
@@ -159,6 +162,8 @@ class StickersManager : public Actor {
   void remove_recent_sticker(bool is_attached, const tl_object_ptr<td_api::InputFile> &input_file,
                              Promise<Unit> &&promise);
 
+  void send_save_recent_sticker_query(bool is_attached, FileId sticker_id, bool unsave, Promise<Unit> &&promise);
+
   void clear_recent_stickers(bool is_attached, Promise<Unit> &&promise);
 
   void on_update_recent_stickers_limit(int32 recent_stickers_limit);
@@ -167,9 +172,14 @@ class StickersManager : public Actor {
 
   void reload_favorite_stickers(bool force);
 
-  void on_get_favorite_stickers(tl_object_ptr<telegram_api::messages_FavedStickers> &&favorite_stickers_ptr);
+  void repair_favorite_stickers(Promise<Unit> &&promise);
 
-  void on_get_favorite_stickers_failed(Status error);
+  void on_get_favorite_stickers(bool is_repair,
+                                tl_object_ptr<telegram_api::messages_FavedStickers> &&favorite_stickers_ptr);
+
+  void on_get_favorite_stickers_failed(bool is_repair, Status error);
+
+  FileSourceId get_favorite_stickers_file_source_id();
 
   vector<FileId> get_favorite_stickers(Promise<Unit> &&promise);
 
@@ -178,6 +188,8 @@ class StickersManager : public Actor {
   void add_favorite_sticker_by_id(FileId sticker_id);
 
   void remove_favorite_sticker(const tl_object_ptr<td_api::InputFile> &input_file, Promise<Unit> &&promise);
+
+  void send_fave_sticker_query(FileId sticker_id, bool unsave, Promise<Unit> &&promise);
 
   vector<FileId> get_attached_sticker_file_ids(const vector<int32> &int_file_ids);
 
@@ -189,7 +201,11 @@ class StickersManager : public Actor {
 
   void reload_recent_stickers(bool is_attached, bool force);
 
+  void repair_recent_stickers(bool is_attached, Promise<Unit> &&promise);
+
   FileId get_sticker_thumbnail_file_id(FileId file_id) const;
+
+  vector<FileId> get_sticker_file_ids(FileId file_id) const;
 
   void delete_sticker_thumbnail(FileId file_id);
 
@@ -197,11 +213,11 @@ class StickersManager : public Actor {
 
   bool merge_stickers(FileId new_id, FileId old_id, bool can_delete_old);
 
-  template <class T>
-  void store_sticker(FileId file_id, bool in_sticker_set, T &storer) const;
+  template <class StorerT>
+  void store_sticker(FileId file_id, bool in_sticker_set, StorerT &storer) const;
 
-  template <class T>
-  FileId parse_sticker(bool in_sticker_set, T &parser);
+  template <class ParserT>
+  FileId parse_sticker(bool in_sticker_set, ParserT &parser);
 
   void on_uploaded_sticker_file(FileId file_id, tl_object_ptr<telegram_api::MessageMedia> media,
                                 Promise<Unit> &&promise);
@@ -215,6 +231,12 @@ class StickersManager : public Actor {
 
   void on_find_sticker_sets_fail(const string &query, Status &&error);
 
+  void send_get_attached_stickers_query(FileId file_id, Promise<Unit> &&promise);
+
+  void after_get_difference();
+
+  void get_current_state(vector<td_api::object_ptr<td_api::Update>> &updates) const;
+
  private:
   static constexpr int32 MAX_FEATURED_STICKER_SET_VIEW_DELAY = 5;
 
@@ -222,8 +244,6 @@ class StickersManager : public Actor {
   static constexpr int64 MAX_STICKER_FILE_SIZE = 1 << 19;          // server side limit
   static constexpr size_t MAX_STICKER_SET_TITLE_LENGTH = 64;       // server side limit
   static constexpr size_t MAX_STICKER_SET_SHORT_NAME_LENGTH = 64;  // server side limit
-
-  static constexpr int64 GREAT_MINDS_SET_ID = 1842540969984001;
 
   class Sticker {
    public:
@@ -239,7 +259,7 @@ class StickersManager : public Actor {
     double y_shift = 0;
     double scale = 0;
 
-    bool is_changed = true;
+    mutable bool is_changed = true;
   };
 
   class StickerSet {
@@ -272,7 +292,7 @@ class StickersManager : public Actor {
   };
 
   struct PendingNewStickerSet {
-    MultiPromiseActor upload_files_multipromise;
+    MultiPromiseActor upload_files_multipromise{"UploadNewStickerSetFilesMultiPromiseActor"};
     UserId user_id;
     string title;
     string short_name;
@@ -294,14 +314,14 @@ class StickersManager : public Actor {
 
   class UploadStickerFileCallback;
 
-  tl_object_ptr<td_api::MaskPoint> get_mask_point_object(int32 point);
+  static tl_object_ptr<td_api::MaskPoint> get_mask_point_object(int32 point);
 
-  tl_object_ptr<td_api::stickerSetInfo> get_sticker_set_info_object(int64 sticker_set_id, size_t covers_limit);
+  tl_object_ptr<td_api::stickerSetInfo> get_sticker_set_info_object(int64 sticker_set_id, size_t covers_limit) const;
 
   Sticker *get_sticker(FileId file_id);
   const Sticker *get_sticker(FileId file_id) const;
 
-  FileId on_get_sticker(std::unique_ptr<Sticker> new_sticker, bool replace);
+  FileId on_get_sticker(unique_ptr<Sticker> new_sticker, bool replace);
 
   StickerSet *get_sticker_set(int64 sticker_set_id);
   const StickerSet *get_sticker_set(int64 sticker_set_id) const;
@@ -372,9 +392,15 @@ class StickersManager : public Actor {
   void on_load_recent_stickers_finished(bool is_attached, vector<FileId> &&recent_sticker_ids,
                                         bool from_database = false);
 
+  td_api::object_ptr<td_api::updateInstalledStickerSets> get_update_installed_sticker_sets_object(int is_mask) const;
+
   void send_update_installed_sticker_sets(bool from_database = false);
 
+  td_api::object_ptr<td_api::updateTrendingStickerSets> get_update_trending_sticker_sets_object() const;
+
   void send_update_featured_sticker_sets();
+
+  td_api::object_ptr<td_api::updateRecentStickers> get_update_recent_stickers_object(int is_attached) const;
 
   void send_update_recent_stickers(bool from_database = false);
 
@@ -396,21 +422,23 @@ class StickersManager : public Actor {
 
   void on_load_favorite_stickers_finished(vector<FileId> &&favorite_sticker_ids, bool from_database = false);
 
+  td_api::object_ptr<td_api::updateFavoriteStickers> get_update_favorite_stickers_object() const;
+
   void send_update_favorite_stickers(bool from_database = false);
 
   void save_favorite_stickers_to_database();
 
-  template <class T>
-  void store_sticker_set(const StickerSet *sticker_set, bool with_stickers, T &storer) const;
+  template <class StorerT>
+  void store_sticker_set(const StickerSet *sticker_set, bool with_stickers, StorerT &storer) const;
 
-  template <class T>
-  void parse_sticker_set(StickerSet *sticker_set, T &parser);
+  template <class ParserT>
+  void parse_sticker_set(StickerSet *sticker_set, ParserT &parser);
 
-  template <class T>
-  void store_sticker_set_id(int64 sticker_set_id, T &storer) const;
+  template <class StorerT>
+  void store_sticker_set_id(int64 sticker_set_id, StorerT &storer) const;
 
-  template <class T>
-  void parse_sticker_set_id(int64 &sticker_set_id, T &parser);
+  template <class ParserT>
+  void parse_sticker_set_id(int64 &sticker_set_id, ParserT &parser);
 
   Result<std::tuple<FileId, bool, bool>> prepare_input_file(const tl_object_ptr<td_api::InputFile> &input_file);
 
@@ -470,7 +498,14 @@ class StickersManager : public Actor {
   vector<Promise<Unit>> load_installed_sticker_sets_queries_[2];
   vector<Promise<Unit>> load_featured_sticker_sets_queries_;
   vector<Promise<Unit>> load_recent_stickers_queries_[2];
+  vector<Promise<Unit>> repair_recent_stickers_queries_[2];
   vector<Promise<Unit>> load_favorite_stickers_queries_;
+  vector<Promise<Unit>> repair_favorite_stickers_queries_;
+
+  vector<FileId> recent_sticker_file_ids_[2];
+  FileSourceId recent_stickers_file_source_id_[2];
+  vector<FileId> favorite_sticker_file_ids_;
+  FileSourceId favorite_stickers_file_source_id_;
 
   vector<int64> archived_sticker_set_ids_[2];
   int32 total_archived_sticker_set_count_[2] = {-1, -1};

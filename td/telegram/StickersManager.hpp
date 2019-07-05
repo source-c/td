@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -20,8 +20,8 @@
 
 namespace td {
 
-template <class T>
-void StickersManager::store_sticker(FileId file_id, bool in_sticker_set, T &storer) const {
+template <class StorerT>
+void StickersManager::store_sticker(FileId file_id, bool in_sticker_set, StorerT &storer) const {
   auto it = stickers_.find(file_id);
   CHECK(it != stickers_.end());
   const Sticker *sticker = it->second.get();
@@ -52,8 +52,8 @@ void StickersManager::store_sticker(FileId file_id, bool in_sticker_set, T &stor
   }
 }
 
-template <class T>
-FileId StickersManager::parse_sticker(bool in_sticker_set, T &parser) {
+template <class ParserT>
+FileId StickersManager::parse_sticker(bool in_sticker_set, ParserT &parser) {
   auto sticker = make_unique<Sticker>();
   bool has_sticker_set_access_hash;
   bool in_sticker_set_stored;
@@ -62,7 +62,7 @@ FileId StickersManager::parse_sticker(bool in_sticker_set, T &parser) {
   PARSE_FLAG(has_sticker_set_access_hash);
   PARSE_FLAG(in_sticker_set_stored);
   END_PARSE_FLAGS();
-  CHECK(in_sticker_set_stored == in_sticker_set)
+  LOG_CHECK(in_sticker_set_stored == in_sticker_set)
       << in_sticker_set << " " << in_sticker_set_stored << " " << parser.version() << " " << sticker->is_mask << " "
       << has_sticker_set_access_hash << " "
       << format::as_hex_dump<4>(parser.template fetch_string_raw<Slice>(parser.get_left_len()));
@@ -88,11 +88,11 @@ FileId StickersManager::parse_sticker(bool in_sticker_set, T &parser) {
     parse(sticker->y_shift, parser);
     parse(sticker->scale, parser);
   }
-  return on_get_sticker(std::move(sticker), true);
+  return on_get_sticker(std::move(sticker), false);  // data in the database is always outdated
 }
 
-template <class T>
-void StickersManager::store_sticker_set(const StickerSet *sticker_set, bool with_stickers, T &storer) const {
+template <class StorerT>
+void StickersManager::store_sticker_set(const StickerSet *sticker_set, bool with_stickers, StorerT &storer) const {
   size_t stickers_limit = with_stickers ? sticker_set->sticker_ids.size() : 5;
   bool is_full = sticker_set->sticker_ids.size() <= stickers_limit;
   bool was_loaded = sticker_set->was_loaded && is_full;
@@ -138,8 +138,8 @@ void StickersManager::store_sticker_set(const StickerSet *sticker_set, bool with
   }
 }
 
-template <class T>
-void StickersManager::parse_sticker_set(StickerSet *sticker_set, T &parser) {
+template <class ParserT>
+void StickersManager::parse_sticker_set(StickerSet *sticker_set, ParserT &parser) {
   CHECK(sticker_set != nullptr);
   CHECK(!sticker_set->was_loaded);
   bool was_inited = sticker_set->is_inited;
@@ -243,8 +243,8 @@ void StickersManager::parse_sticker_set(StickerSet *sticker_set, T &parser) {
   }
 }
 
-template <class T>
-void StickersManager::store_sticker_set_id(int64 sticker_set_id, T &storer) const {
+template <class StorerT>
+void StickersManager::store_sticker_set_id(int64 sticker_set_id, StorerT &storer) const {
   CHECK(sticker_set_id != 0);
   const StickerSet *sticker_set = get_sticker_set(sticker_set_id);
   CHECK(sticker_set != nullptr);
@@ -252,8 +252,8 @@ void StickersManager::store_sticker_set_id(int64 sticker_set_id, T &storer) cons
   store(sticker_set->access_hash, storer);
 }
 
-template <class T>
-void StickersManager::parse_sticker_set_id(int64 &sticker_set_id, T &parser) {
+template <class ParserT>
+void StickersManager::parse_sticker_set_id(int64 &sticker_set_id, ParserT &parser) {
   parse(sticker_set_id, parser);
   int64 sticker_set_access_hash;
   parse(sticker_set_access_hash, parser);

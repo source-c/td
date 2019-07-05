@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -206,8 +206,8 @@ namespace TdExample
         static void Main()
         {
             // disable TDLib log
-            Td.Log.SetVerbosityLevel(0);
-            if (!Td.Log.SetFilePath("tdlib.log"))
+            Td.Client.Execute(new TdApi.SetLogVerbosityLevel(0));
+            if (Td.Client.Execute(new TdApi.SetLogStream(new TdApi.LogStreamFile("tdlib.log", 1 << 27))) is TdApi.Error)
             {
                 throw new System.IO.IOException("Write access to the current directory is required");
             }
@@ -216,7 +216,7 @@ namespace TdExample
             _client = CreateTdClient();
 
             // test Client.Execute
-            _defaultHandler.OnResult(_client.Execute(new TdApi.GetTextEntities("@telegram /test_command https://telegram.org telegram.me @gif @test")));
+            _defaultHandler.OnResult(Td.Client.Execute(new TdApi.GetTextEntities("@telegram /test_command https://telegram.org telegram.me @gif @test")));
 
             // main loop
             while (!_quiting)

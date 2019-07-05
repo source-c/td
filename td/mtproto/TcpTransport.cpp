@@ -1,12 +1,13 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/mtproto/TcpTransport.h"
 
-#include "td/utils/logging.h"
+#include "td/utils/as.h"
+#include "td/utils/common.h"
 #include "td/utils/Random.h"
 #include "td/utils/Slice.h"
 
@@ -130,8 +131,7 @@ void AbridgedTransport::write_prepare_inplace(BufferWriter *message, bool quick_
 }
 
 void AbridgedTransport::init_output_stream(ChainBufferWriter *stream) {
-  const uint8 magic = 0xef;
-  stream->append(Slice(&magic, 1));
+  stream->append("\xef");
 }
 
 void ObfuscatedTransport::init(ChainBufferReader *input, ChainBufferWriter *output) {
@@ -149,12 +149,12 @@ void ObfuscatedTransport::init(ChainBufferReader *input, ChainBufferWriter *outp
     if (as<uint8>(header.data()) == 0xef) {
       continue;
     }
-    auto first_int = as<uint32>(header.data());
+    uint32 first_int = as<uint32>(header.data());
     if (first_int == 0x44414548 || first_int == 0x54534f50 || first_int == 0x20544547 || first_int == 0x4954504f ||
         first_int == 0xdddddddd || first_int == 0xeeeeeeee) {
       continue;
     }
-    auto second_int = as<uint32>(header.data() + sizeof(uint32));
+    uint32 second_int = as<uint32>(header.data() + sizeof(uint32));
     if (second_int == 0) {
       continue;
     }
@@ -169,7 +169,7 @@ void ObfuscatedTransport::init(ChainBufferReader *input, ChainBufferWriter *outp
 
   string rheader = header;
   std::reverse(rheader.begin(), rheader.end());
-  auto key = as<UInt256>(rheader.data() + 8);
+  UInt256 key = as<UInt256>(rheader.data() + 8);
   if (secret_.size() == 17) {
     secret_ = secret_.substr(1);
   }

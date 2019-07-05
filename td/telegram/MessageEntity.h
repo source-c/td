@@ -1,11 +1,13 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
+#include "td/telegram/Dependencies.h"
+#include "td/telegram/DialogId.h"
 #include "td/telegram/UserId.h"
 
 #include "td/utils/common.h"
@@ -106,7 +108,7 @@ inline bool operator!=(const FormattedText &lhs, const FormattedText &rhs) {
 const std::unordered_set<Slice, SliceHash> &get_valid_short_usernames();
 
 Result<vector<MessageEntity>> get_message_entities(const ContactsManager *contacts_manager,
-                                                   const vector<tl_object_ptr<td_api::textEntity>> &input_entities);
+                                                   vector<tl_object_ptr<td_api::textEntity>> &&input_entities);
 
 vector<tl_object_ptr<td_api::textEntity>> get_text_entities_object(const vector<MessageEntity> &entities);
 
@@ -131,6 +133,10 @@ vector<tl_object_ptr<telegram_api::MessageEntity>> get_input_message_entities(co
                                                                               const vector<MessageEntity> &entities,
                                                                               const char *source);
 
+vector<tl_object_ptr<telegram_api::MessageEntity>> get_input_message_entities(const ContactsManager *contacts_manager,
+                                                                              const FormattedText *text,
+                                                                              const char *source);
+
 vector<tl_object_ptr<secret_api::MessageEntity>> get_input_secret_message_entities(
     const vector<MessageEntity> &entities);
 
@@ -143,5 +149,19 @@ vector<MessageEntity> get_message_entities(vector<tl_object_ptr<secret_api::Mess
 // like clean_input_string but also validates entities
 Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool allow_empty, bool skip_new_entities,
                           bool skip_bot_commands, bool for_draft) TD_WARN_UNUSED_RESULT;
+
+FormattedText get_message_text(const ContactsManager *contacts_manager, string message_text,
+                               vector<tl_object_ptr<telegram_api::MessageEntity>> &&server_entities,
+                               bool skip_new_entities, int32 send_date, const char *source);
+
+td_api::object_ptr<td_api::formattedText> extract_input_caption(
+    tl_object_ptr<td_api::InputMessageContent> &input_message_content);
+
+Result<FormattedText> process_input_caption(const ContactsManager *contacts_manager, DialogId dialog_id,
+                                            tl_object_ptr<td_api::formattedText> &&caption, bool is_bot);
+
+void add_formatted_text_dependencies(Dependencies &dependencies, const FormattedText *text);
+
+bool need_skip_bot_commands(const ContactsManager *contacts_manager, DialogId dialog_id, bool is_bot);
 
 }  // namespace td

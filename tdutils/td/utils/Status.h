@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -15,6 +15,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -342,6 +343,7 @@ class Result {
     other.status_ = Status::Error<-2>();
   }
   Result &operator=(Result &&other) {
+    CHECK(this != &other);
     if (status_.is_ok()) {
       value_.~T();
     }
@@ -402,19 +404,19 @@ class Result {
     return std::move(status_);
   }
   const T &ok() const {
-    CHECK(status_.is_ok()) << status_;
+    LOG_CHECK(status_.is_ok()) << status_;
     return value_;
   }
   T &ok_ref() {
-    CHECK(status_.is_ok()) << status_;
+    LOG_CHECK(status_.is_ok()) << status_;
     return value_;
   }
   const T &ok_ref() const {
-    CHECK(status_.is_ok()) << status_;
+    LOG_CHECK(status_.is_ok()) << status_;
     return value_;
   }
   T move_as_ok() {
-    CHECK(status_.is_ok()) << status_;
+    LOG_CHECK(status_.is_ok()) << status_;
     return std::move(value_);
   }
 

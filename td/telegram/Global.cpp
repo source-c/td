@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,13 +11,13 @@
 #include "td/telegram/net/MtprotoHeader.h"
 #include "td/telegram/net/NetQueryDispatcher.h"
 #include "td/telegram/net/TempAuthKeyWatchdog.h"
+#include "td/telegram/StateManager.h"
 #include "td/telegram/TdDb.h"
 
 #include "td/actor/PromiseFuture.h"
 
-#include "td/db/Pmc.h"
-
 #include "td/utils/format.h"
+#include "td/utils/logging.h"
 #include "td/utils/port/Clocks.h"
 #include "td/utils/tl_helpers.h"
 
@@ -57,20 +57,20 @@ void Global::set_temp_auth_key_watchdog(ActorOwn<TempAuthKeyWatchdog> actor) {
 MtprotoHeader &Global::mtproto_header() {
   return *mtproto_header_;
 }
-void Global::set_mtproto_header(std::unique_ptr<MtprotoHeader> mtproto_header) {
+void Global::set_mtproto_header(unique_ptr<MtprotoHeader> mtproto_header) {
   mtproto_header_ = std::move(mtproto_header);
 }
 
-Status Global::init(const TdParameters &parameters, ActorId<Td> td, std::unique_ptr<TdDb> td_db) {
+Status Global::init(const TdParameters &parameters, ActorId<Td> td, unique_ptr<TdDb> td_db_ptr) {
   parameters_ = parameters;
 
   gc_scheduler_id_ = min(Scheduler::instance()->sched_id() + 2, Scheduler::instance()->sched_count() - 1);
   slow_net_scheduler_id_ = min(Scheduler::instance()->sched_id() + 3, Scheduler::instance()->sched_count() - 1);
 
   td_ = td;
-  td_db_ = std::move(td_db);
+  td_db_ = std::move(td_db_ptr);
 
-  string save_diff_str = this->td_db()->get_binlog_pmc()->get("server_time_difference");
+  string save_diff_str = td_db()->get_binlog_pmc()->get("server_time_difference");
   if (save_diff_str.empty()) {
     server_time_difference_ = Clocks::system() - Time::now();
     server_time_difference_was_updated_ = false;
@@ -100,6 +100,7 @@ void Global::update_server_time_difference(double diff) {
 }
 
 DcId Global::get_webfile_dc_id() const {
+  CHECK(shared_config_ != nullptr);
   int32 dc_id = shared_config_->get_option_integer("webfile_dc_id");
   if (!DcId::is_valid(dc_id)) {
     if (is_test_dc()) {
@@ -114,11 +115,16 @@ DcId Global::get_webfile_dc_id() const {
   return DcId::internal(dc_id);
 }
 
-void Global::set_net_query_dispatcher(std::unique_ptr<NetQueryDispatcher> net_query_dispatcher) {
+bool Global::ignore_backgrond_updates() const {
+  return !parameters_.use_file_db && !parameters_.use_secret_chats &&
+         shared_config_->get_option_boolean("ignore_background_updates");
+}
+
+void Global::set_net_query_dispatcher(unique_ptr<NetQueryDispatcher> net_query_dispatcher) {
   net_query_dispatcher_ = std::move(net_query_dispatcher);
 }
 
-void Global::set_shared_config(std::unique_ptr<ConfigShared> shared_config) {
+void Global::set_shared_config(unique_ptr<ConfigShared> shared_config) {
   shared_config_ = std::move(shared_config);
 }
 

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,13 +11,13 @@
 #include "td/telegram/files/FileId.hpp"
 #include "td/telegram/Photo.hpp"
 
-#include "td/utils/logging.h"
+#include "td/utils/common.h"
 #include "td/utils/tl_helpers.h"
 
 namespace td {
 
-template <class T>
-void VideosManager::store_video(FileId file_id, T &storer) const {
+template <class StorerT>
+void VideosManager::store_video(FileId file_id, StorerT &storer) const {
   auto it = videos_.find(file_id);
   CHECK(it != videos_.end());
   const Video *video = it->second.get();
@@ -36,8 +36,8 @@ void VideosManager::store_video(FileId file_id, T &storer) const {
   }
 }
 
-template <class T>
-FileId VideosManager::parse_video(T &parser) {
+template <class ParserT>
+FileId VideosManager::parse_video(ParserT &parser) {
   auto video = make_unique<Video>();
   BEGIN_PARSE_FLAGS();
   PARSE_FLAG(video->has_stickers);
@@ -52,7 +52,7 @@ FileId VideosManager::parse_video(T &parser) {
   if (video->has_stickers) {
     parse(video->sticker_file_ids, parser);
   }
-  return on_get_video(std::move(video), true);
+  return on_get_video(std::move(video), false);
 }
 
 }  // namespace td

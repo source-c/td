@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -19,16 +19,14 @@
 #include <unordered_map>
 
 namespace td {
-class Td;
-}  // namespace td
 
-namespace td {
+class Td;
 
 class VideoNotesManager {
  public:
   explicit VideoNotesManager(Td *td);
 
-  int32 get_video_note_duration(FileId file_id);
+  int32 get_video_note_duration(FileId file_id) const;
 
   tl_object_ptr<td_api::videoNote> get_video_note_object(FileId file_id);
 
@@ -50,11 +48,11 @@ class VideoNotesManager {
 
   bool merge_video_notes(FileId new_id, FileId old_id, bool can_delete_old);
 
-  template <class T>
-  void store_video_note(FileId file_id, T &storer) const;
+  template <class StorerT>
+  void store_video_note(FileId file_id, StorerT &storer) const;
 
-  template <class T>
-  FileId parse_video_note(T &parser);
+  template <class ParserT>
+  FileId parse_video_note(ParserT &parser);
 
  private:
   class VideoNote {
@@ -70,7 +68,7 @@ class VideoNotesManager {
 
   const VideoNote *get_video_note(FileId file_id) const;
 
-  FileId on_get_video_note(std::unique_ptr<VideoNote> new_video_note, bool replace);
+  FileId on_get_video_note(unique_ptr<VideoNote> new_video_note, bool replace);
 
   Td *td_;
   std::unordered_map<FileId, unique_ptr<VideoNote>, FileIdHash> video_notes_;

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -39,7 +39,7 @@ TEST(Gzip, flow) {
   auto str = td::rand_string('a', 'z', 1000000);
   auto parts = td::rand_split(str);
 
-  auto input_writer = td::ChainBufferWriter::create_empty();
+  td::ChainBufferWriter input_writer;
   auto input = input_writer.extract_reader();
   td::ByteFlowSource source(&input);
   td::GzipByteFlow gzip_flow(td::Gzip::Encode);
@@ -89,7 +89,7 @@ TEST(Gzip, flow_error) {
 TEST(Gzip, encode_decode_flow) {
   auto str = td::rand_string('a', 'z', 1000000);
   auto parts = td::rand_split(str);
-  auto input_writer = td::ChainBufferWriter::create_empty();
+  td::ChainBufferWriter input_writer;
   auto input = input_writer.extract_reader();
   td::ByteFlowSource source(&input);
   td::GzipByteFlow gzip_encode_flow(td::Gzip::Encode);

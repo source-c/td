@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -124,7 +124,7 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
           return Status::Error(413, PSLICE() << "Request Entity Too Large: content length is " << content_length_);
         }
 
-        if (std::strstr(content_type_lowercased_.c_str(), "multipart/form-data")) {
+        if (content_type_lowercased_.find("multipart/form-data") != string::npos) {
           state_ = ReadMultipartFormData;
 
           const char *p = std::strstr(content_type_lowercased_.c_str(), "boundary");
@@ -157,8 +157,8 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
           form_data_parse_state_ = SkipPrologue;
           form_data_read_length_ = 0;
           form_data_skipped_length_ = 0;
-        } else if (std::strstr(content_type_lowercased_.c_str(), "application/x-www-form-urlencoded") ||
-                   std::strstr(content_type_lowercased_.c_str(), "application/json")) {
+        } else if (content_type_lowercased_.find("application/x-www-form-urlencoded") != string::npos ||
+                   content_type_lowercased_.find("application/json") != string::npos) {
           state_ = ReadArgs;
         } else {
           form_data_skipped_length_ = 0;
@@ -210,7 +210,7 @@ Result<size_t> HttpReader::read_next(HttpQuery *query) {
         if (flow_sink_.is_ready()) {
           query_->container_.emplace_back(content_->cut_head(size).move_as_buffer_slice());
           Status result;
-          if (std::strstr(content_type_lowercased_.c_str(), "application/x-www-form-urlencoded")) {
+          if (content_type_lowercased_.find("application/x-www-form-urlencoded") != string::npos) {
             result = parse_parameters(query_->container_.back().as_slice());
           } else {
             result = parse_json_parameters(query_->container_.back().as_slice());
@@ -290,6 +290,7 @@ Result<bool> HttpReader::parse_multipart_form_data() {
           file_field_name_.clear();
           field_content_type_ = "application/octet-stream";
           file_name_.clear();
+          has_file_name_ = false;
           CHECK(temp_file_.empty());
           temp_file_name_.clear();
 
@@ -349,6 +350,7 @@ Result<bool> HttpReader::parse_multipart_form_data() {
                   field_name_ = value;
                 } else if (key == "filename") {
                   file_name_ = value.str();
+                  has_file_name_ = true;
                 } else {
                   // ignore unknown parts of header
                 }
@@ -368,7 +370,7 @@ Result<bool> HttpReader::parse_multipart_form_data() {
             return Status::Error(400, "Bad Request: field name in multipart/form-data not found");
           }
 
-          if (!file_name_.empty()) {
+          if (has_file_name_) {
             // file
             if (query_->files_.size() == max_files_) {
               return Status::Error(413, "Request Entity Too Large: too much files attached");
@@ -515,7 +517,7 @@ void HttpReader::process_header(MutableSlice header_name, MutableSlice header_va
   header_name = trim(header_name);
   header_value = trim(header_value);  // TODO need to remove "\r\n" from value
   to_lower_inplace(header_name);
-  LOG(DEBUG) << "process_header [" << header_name << "=>" << header_value << "]";
+  LOG(DEBUG) << "Process header [" << header_name << "=>" << header_value << "]";
   query_->headers_.emplace_back(header_name, header_value);
   // TODO: check if protocol is HTTP/1.1
   query_->keep_alive_ = true;
@@ -689,10 +691,10 @@ Status HttpReader::parse_head(MutableSlice head) {
   parser.skip('\n');
 
   content_length_ = 0;
-  content_type_ = "application/octet-stream";
+  content_type_ = Slice("application/octet-stream");
   content_type_lowercased_ = content_type_.str();
-  transfer_encoding_ = "";
-  content_encoding_ = "";
+  transfer_encoding_ = Slice();
+  content_encoding_ = Slice();
 
   query_->keep_alive_ = false;
   query_->headers_.clear();

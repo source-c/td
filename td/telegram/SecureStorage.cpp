@@ -1,11 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/telegram/SecureStorage.h"
 
+#include "td/utils/as.h"
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
@@ -51,7 +52,7 @@ AesCbcState calc_aes_cbc_state_sha512(Slice seed) {
 }
 
 template <class F>
-static Status data_view_for_each(DataView &data, F &&f) {
+static Status data_view_for_each(const DataView &data, F &&f) {
   const int64 step = 128 << 10;
   for (int64 i = 0, size = data.size(); i < size; i += step) {
     TRY_RESULT(bytes, data.pread(i, min(step, size - i)));
@@ -60,13 +61,13 @@ static Status data_view_for_each(DataView &data, F &&f) {
   return Status::OK();
 }
 
-Result<ValueHash> calc_value_hash(DataView &data_view) {
+Result<ValueHash> calc_value_hash(const DataView &data_view) {
   Sha256State state;
   sha256_init(&state);
-  data_view_for_each(data_view, [&state](BufferSlice bytes) {
+  TRY_STATUS(data_view_for_each(data_view, [&state](BufferSlice bytes) {
     sha256_update(bytes.as_slice(), &state);
     return Status::OK();
-  });
+  }));
   UInt256 res;
   sha256_final(&state, as_slice(res));
   return ValueHash{res};
@@ -93,7 +94,7 @@ int64 FileDataView::size() const {
   return size_;
 }
 
-Result<BufferSlice> FileDataView::pread(int64 offset, int64 size) {
+Result<BufferSlice> FileDataView::pread(int64 offset, int64 size) const {
   auto slice = BufferSlice(narrow_cast<size_t>(size));
   TRY_RESULT(actual_size, fd_.pread(slice.as_slice(), offset));
   if (static_cast<int64>(actual_size) != size) {
@@ -109,7 +110,7 @@ int64 BufferSliceDataView::size() const {
   return narrow_cast<int64>(buffer_slice_.size());
 }
 
-Result<BufferSlice> BufferSliceDataView::pread(int64 offset, int64 size) {
+Result<BufferSlice> BufferSliceDataView::pread(int64 offset, int64 size) const {
   auto end_offset = size + offset;
   if (this->size() < end_offset) {
     return Status::Error("Not enough data in BufferSlice");
@@ -117,20 +118,20 @@ Result<BufferSlice> BufferSliceDataView::pread(int64 offset, int64 size) {
   return BufferSlice(buffer_slice_.as_slice().substr(narrow_cast<size_t>(offset), narrow_cast<size_t>(size)));
 }
 
-ConcatDataView::ConcatDataView(DataView &left, DataView &right) : left_(left), right_(right) {
+ConcatDataView::ConcatDataView(const DataView &left, const DataView &right) : left_(left), right_(right) {
 }
 
 int64 ConcatDataView::size() const {
   return left_.size() + right_.size();
 }
 
-Result<BufferSlice> ConcatDataView::pread(int64 offset, int64 size) {
+Result<BufferSlice> ConcatDataView::pread(int64 offset, int64 size) const {
   auto end_offset = size + offset;
   if (this->size() < end_offset) {
     return Status::Error("Not enough data in ConcatDataView");
   }
 
-  auto substr = [](DataView &slice, int64 offset, int64 size) -> Result<BufferSlice> {
+  auto substr = [](const DataView &slice, int64 offset, int64 size) -> Result<BufferSlice> {
     auto l = max(int64{0}, offset);
     auto r = min(slice.size(), offset + size);
     if (l >= r) {
@@ -183,7 +184,7 @@ Result<Secret> Secret::create(Slice secret) {
 
   UInt256 secret_sha256;
   sha256(secret, ::td::as_slice(secret_sha256));
-  auto hash = as<int64>(secret_sha256.raw);
+  int64 hash = as<int64>(secret_sha256.raw);
   return Secret{res, hash};
 }
 
@@ -302,7 +303,7 @@ Result<ValueHash> Decryptor::finish() {
   return ValueHash{res};
 }
 
-Encryptor::Encryptor(AesCbcState aes_cbc_state, DataView &data_view)
+Encryptor::Encryptor(AesCbcState aes_cbc_state, const DataView &data_view)
     : aes_cbc_state_(std::move(aes_cbc_state)), data_view_(data_view) {
 }
 
@@ -310,7 +311,7 @@ int64 Encryptor::size() const {
   return data_view_.size();
 }
 
-Result<BufferSlice> Encryptor::pread(int64 offset, int64 size) {
+Result<BufferSlice> Encryptor::pread(int64 offset, int64 size) const {
   if (offset != current_offset_) {
     return Status::Error("Arbitrary offset is not supported");
   }

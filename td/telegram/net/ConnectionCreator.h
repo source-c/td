@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -15,7 +15,7 @@
 #include "td/telegram/net/NetQuery.h"
 #include "td/telegram/StateManager.h"
 
-#include "td/mtproto/IStreamTransport.h"
+#include "td/mtproto/TransportType.h"
 
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
@@ -23,7 +23,9 @@
 
 #include "td/net/NetStats.h"
 
+#include "td/utils/common.h"
 #include "td/utils/FloodControlStrict.h"
+#include "td/utils/logging.h"
 #include "td/utils/port/IPAddress.h"
 #include "td/utils/port/SocketFd.h"
 #include "td/utils/Slice.h"
@@ -47,6 +49,8 @@ class GetHostByNameActor;
 }  // namespace td
 
 namespace td {
+
+extern int VERBOSITY_NAME(connections);
 
 class Proxy {
  public:
@@ -114,11 +118,11 @@ class Proxy {
     return type_;
   }
 
-  template <class T>
-  void parse(T &parser);
+  template <class StorerT>
+  void store(StorerT &storer) const;
 
-  template <class T>
-  void store(T &storer) const;
+  template <class ParserT>
+  void parse(ParserT &parser);
 
  private:
   Type type_{Type::None};
@@ -152,8 +156,8 @@ class ConnectionCreator : public NetQueryCallback {
   void on_pong(size_t hash);
   void on_mtproto_error(size_t hash);
   void request_raw_connection(DcId dc_id, bool allow_media_only, bool is_media,
-                              Promise<std::unique_ptr<mtproto::RawConnection>> promise, size_t hash = 0);
-  void request_raw_connection_by_ip(IPAddress ip_address, Promise<std::unique_ptr<mtproto::RawConnection>> promise);
+                              Promise<unique_ptr<mtproto::RawConnection>> promise, size_t hash = 0);
+  void request_raw_connection_by_ip(IPAddress ip_address, Promise<unique_ptr<mtproto::RawConnection>> promise);
 
   void set_net_stats_callback(std::shared_ptr<NetStatsCallback> common_callback,
                               std::shared_ptr<NetStatsCallback> media_callback);
@@ -182,6 +186,7 @@ class ConnectionCreator : public NetQueryCallback {
   int32 max_proxy_id_ = 0;
   int32 active_proxy_id_ = 0;
   ActorOwn<GetHostByNameActor> get_host_by_name_actor_;
+  ActorOwn<GetHostByNameActor> block_get_host_by_name_actor_;
   IPAddress proxy_ip_address_;
   Timestamp resolve_proxy_timestamp_;
   uint64 resolve_proxy_query_token_{0};
@@ -222,8 +227,8 @@ class ConnectionCreator : public NetQueryCallback {
     Slot slot;
     size_t pending_connections{0};
     size_t checking_connections{0};
-    std::vector<std::pair<std::unique_ptr<mtproto::RawConnection>, double>> ready_connections;
-    std::vector<Promise<std::unique_ptr<mtproto::RawConnection>>> queries;
+    std::vector<std::pair<unique_ptr<mtproto::RawConnection>, double>> ready_connections;
+    std::vector<Promise<unique_ptr<mtproto::RawConnection>>> queries;
 
     static constexpr double READY_CONNECTIONS_TIMEOUT = 10;
 
@@ -256,6 +261,7 @@ class ConnectionCreator : public NetQueryCallback {
     return ++current_token_;
   }
 
+  void set_active_proxy_id(int32 proxy_id, bool from_binlog = false);
   void enable_proxy_impl(int32 proxy_id);
   void disable_proxy_impl();
   void on_proxy_changed(bool from_db);
@@ -273,10 +279,9 @@ class ConnectionCreator : public NetQueryCallback {
 
   void save_dc_options();
   Result<SocketFd> do_request_connection(DcId dc_id, bool allow_media_only);
-  Result<std::pair<std::unique_ptr<mtproto::RawConnection>, bool>> do_request_raw_connection(DcId dc_id,
-                                                                                             bool allow_media_only,
-                                                                                             bool is_media,
-                                                                                             size_t hash);
+  Result<std::pair<unique_ptr<mtproto::RawConnection>, bool>> do_request_raw_connection(DcId dc_id,
+                                                                                        bool allow_media_only,
+                                                                                        bool is_media, size_t hash);
 
   void on_network(bool network_flag, uint32 network_generation);
   void on_online(bool online_flag);
@@ -288,13 +293,12 @@ class ConnectionCreator : public NetQueryCallback {
   struct ConnectionData {
     SocketFd socket_fd;
     StateManager::ConnectionToken connection_token;
-    std::unique_ptr<detail::StatsCallback> stats_callback;
+    unique_ptr<detail::StatsCallback> stats_callback;
   };
   void client_create_raw_connection(Result<ConnectionData> r_connection_data, bool check_mode,
                                     mtproto::TransportType transport_type, size_t hash, string debug_str,
                                     uint32 network_generation);
-  void client_add_connection(size_t hash, Result<std::unique_ptr<mtproto::RawConnection>> r_raw_connection,
-                             bool check_flag);
+  void client_add_connection(size_t hash, Result<unique_ptr<mtproto::RawConnection>> r_raw_connection, bool check_flag);
   void client_set_timeout_at(ClientInfo &client, double wakeup_at);
 
   void on_get_proxy_info(telegram_api::object_ptr<telegram_api::help_ProxyData> proxy_data_ptr);
@@ -319,6 +323,8 @@ class ConnectionCreator : public NetQueryCallback {
 
   Result<SocketFd> find_connection(const ProxyInfo &proxy, DcId dc_id, bool allow_media_only,
                                    FindConnectionExtra &extra);
+
+  ActorId<GetHostByNameActor> get_dns_resolver();
 
   void ping_proxy_resolved(int32 proxy_id, IPAddress ip_address, Promise<double> promise);
 

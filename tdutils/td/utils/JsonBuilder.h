@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -200,8 +200,7 @@ class Jsonable {};
 
 class JsonScope {
  public:
-  explicit JsonScope(JsonBuilder *jb) : sb_(&jb->sb_), jb_(jb) {
-    save_scope_ = jb_->scope_;
+  explicit JsonScope(JsonBuilder *jb) : sb_(&jb->sb_), jb_(jb), save_scope_(jb->scope_) {
     jb_->scope_ = this;
     CHECK(is_active());
   }
@@ -724,8 +723,8 @@ Status json_string_skip(Parser &parser) TD_WARN_UNUSED_RESULT;
 Result<JsonValue> do_json_decode(Parser &parser, int32 max_depth) TD_WARN_UNUSED_RESULT;
 Status do_json_skip(Parser &parser, int32 max_depth) TD_WARN_UNUSED_RESULT;
 
-inline Result<JsonValue> json_decode(MutableSlice from) {
-  Parser parser(from);
+inline Result<JsonValue> json_decode(MutableSlice json) {
+  Parser parser(json);
   const int32 DEFAULT_MAX_DEPTH = 100;
   auto result = do_json_decode(parser, DEFAULT_MAX_DEPTH);
   if (result.is_ok()) {
@@ -739,11 +738,11 @@ inline Result<JsonValue> json_decode(MutableSlice from) {
 
 template <class StrT, class ValT>
 StrT json_encode(const ValT &val) {
-  auto buf_len = 1 << 19;
+  auto buf_len = 1 << 18;
   auto buf = StackAllocator::alloc(buf_len);
-  JsonBuilder jb(StringBuilder(buf.as_slice()));
+  JsonBuilder jb(StringBuilder(buf.as_slice(), true));
   jb.enter_value() << val;
-  LOG_IF(ERROR, jb.string_builder().is_error()) << "Json buffer overflow";
+  LOG_IF(ERROR, jb.string_builder().is_error()) << "JSON buffer overflow";
   auto slice = jb.string_builder().as_cslice();
   return StrT(slice.begin(), slice.size());
 }
@@ -817,7 +816,7 @@ auto json_array(const A &a, F &&f) {
   });
 }
 
-bool has_json_object_field(JsonObject &object, Slice name);
+bool has_json_object_field(const JsonObject &object, Slice name);
 
 Result<JsonValue> get_json_object_field(JsonObject &object, Slice name, JsonValue::Type type,
                                         bool is_optional = true) TD_WARN_UNUSED_RESULT;
@@ -827,6 +826,9 @@ Result<bool> get_json_object_bool_field(JsonObject &object, Slice name, bool is_
 
 Result<int32> get_json_object_int_field(JsonObject &object, Slice name, bool is_optional = true,
                                         int32 default_value = 0) TD_WARN_UNUSED_RESULT;
+
+Result<int64> get_json_object_long_field(JsonObject &object, Slice name, bool is_optional = true,
+                                         int64 default_value = 0) TD_WARN_UNUSED_RESULT;
 
 Result<double> get_json_object_double_field(JsonObject &object, Slice name, bool is_optional = true,
                                             double default_value = 0.0) TD_WARN_UNUSED_RESULT;

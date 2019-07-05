@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,7 +7,10 @@
 #include "td/telegram/SecureValue.h"
 
 #include "td/telegram/DialogId.h"
+#include "td/telegram/files/FileEncryptionKey.h"
+#include "td/telegram/files/FileLocation.h"
 #include "td/telegram/files/FileManager.h"
+#include "td/telegram/files/FileType.h"
 #include "td/telegram/Global.h"
 #include "td/telegram/misc.h"
 #include "td/telegram/net/DcId.h"
@@ -353,7 +356,8 @@ EncryptedSecureFile get_encrypted_secure_file(FileManager *file_manager,
         break;
       }
       result.file.file_id = file_manager->register_remote(
-          FullRemoteFileLocation(FileType::Secure, secure_file->id_, secure_file->access_hash_, DcId::internal(dc_id)),
+          FullRemoteFileLocation(FileType::Secure, secure_file->id_, secure_file->access_hash_, DcId::internal(dc_id),
+                                 ""),
           FileLocationSource::FromServer, DialogId(), 0, secure_file->size_, PSTRING() << secure_file->id_ << ".jpg");
       result.file.date = secure_file->date_;
       if (result.file.date < 0) {
@@ -424,11 +428,12 @@ static td_api::object_ptr<td_api::datedFile> get_dated_file_object(FileManager *
     LOG(ERROR) << "Have wrong file in get_dated_file_object";
     return nullptr;
   }
-  dated_file.file_id = file_manager->register_remote(
-      FullRemoteFileLocation(FileType::SecureRaw, file_view.remote_location().get_id(),
-                             file_view.remote_location().get_access_hash(), file_view.remote_location().get_dc_id()),
-      FileLocationSource::FromServer, DialogId(), file_view.size(), file_view.expected_size(),
-      file_view.suggested_name());
+  dated_file.file_id =
+      file_manager->register_remote(FullRemoteFileLocation(FileType::SecureRaw, file_view.remote_location().get_id(),
+                                                           file_view.remote_location().get_access_hash(),
+                                                           file_view.remote_location().get_dc_id(), ""),
+                                    FileLocationSource::FromServer, DialogId(), file_view.size(),
+                                    file_view.expected_size(), file_view.suggested_name());
   return get_dated_file_object(file_manager, dated_file);
 }
 
@@ -670,13 +675,6 @@ td_api::object_ptr<td_api::encryptedCredentials> get_encrypted_credentials_objec
                                                            credentials.encrypted_secret);
 }
 
-static string lpad0(string str, size_t size) {
-  if (str.size() >= size) {
-    return str;
-  }
-  return string(size - str.size(), '0') + str;
-}
-
 // TODO tests
 static Status check_date(int32 day, int32 month, int32 year) {
   if (day < 1 || day > 31) {
@@ -724,12 +722,13 @@ static Result<td_api::object_ptr<td_api::date>> get_date_object(Slice date) {
   if (date.empty()) {
     return nullptr;
   }
-  if (date.size() != 10u) {
-    return Status::Error(400, "Date has wrong size");
+  if (date.size() > 10u || date.size() < 8u) {
+    return Status::Error(400, PSLICE() << "Date \"" << date << "\" has wrong length");
   }
   auto parts = full_split(date, '.');
-  if (parts.size() != 3 || parts[0].size() != 2 || parts[1].size() != 2 || parts[2].size() != 4) {
-    return Status::Error(400, "Date has wrong parts");
+  if (parts.size() != 3 || parts[0].size() > 2 || parts[1].size() > 2 || parts[2].size() != 4 || parts[0].empty() ||
+      parts[1].empty()) {
+    return Status::Error(400, PSLICE() << "Date \"" << date << "\" has wrong parts");
   }
   TRY_RESULT(day, to_int32(parts[0]));
   TRY_RESULT(month, to_int32(parts[1]));

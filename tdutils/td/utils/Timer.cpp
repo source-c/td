@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -30,12 +30,16 @@ PerfWarningTimer::PerfWarningTimer(PerfWarningTimer &&other)
 }
 
 PerfWarningTimer::~PerfWarningTimer() {
+  reset();
+}
+void PerfWarningTimer::reset() {
   if (start_at_ == 0) {
     return;
   }
   double duration = Time::now() - start_at_;
   LOG_IF(WARNING, duration > max_duration_)
       << "SLOW: " << tag("name", name_) << tag("duration", format::as_time(duration));
+  start_at_ = 0;
 }
 
 }  // namespace td

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -10,6 +10,7 @@
 #include "td/utils/common.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
+#include "td/utils/UInt.h"
 
 namespace td {
 
@@ -43,7 +44,7 @@ class AesCtrState {
 
  private:
   class Impl;
-  std::unique_ptr<Impl> ctx_;
+  unique_ptr<Impl> ctx_;
 };
 
 class AesCbcState {
@@ -75,7 +76,7 @@ struct Sha256State {
   Sha256State(Sha256State &&from);
   Sha256State &operator=(Sha256State &&from);
   ~Sha256State();
-  std::unique_ptr<Sha256StateImpl> impl;
+  unique_ptr<Sha256StateImpl> impl;
 };
 
 void sha256_init(Sha256State *state);
@@ -98,6 +99,10 @@ void init_openssl_threads();
 
 #if TD_HAVE_ZLIB
 uint32 crc32(Slice data);
+#endif
+
+#if TD_HAVE_CRC32C
+uint32 crc32c(Slice data);
 #endif
 
 uint64 crc64(Slice data);

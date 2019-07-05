@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,6 +8,7 @@
 
 #include "td/telegram/files/FileLocation.h"
 #include "td/telegram/Global.h"
+#include "td/telegram/TdDb.h"
 
 #include "td/utils/common.h"
 #include "td/utils/filesystem.h"
@@ -76,6 +77,7 @@ bool for_suggested_file_name(CSlice name, bool use_pmc, bool use_random, F &&cal
     if (r_path.is_error()) {
       return true;
     }
+    LOG(DEBUG) << "Trying " << r_path.ok();
     return callback(r_path.move_as_ok());
   };
   auto cleaned_name = clean_filename(name);
@@ -156,31 +158,26 @@ Result<FullLocalFileLocation> save_file_bytes(FileType type, BufferSlice bytes, 
   return FullLocalFileLocation(type, std::move(perm_path), 0);
 }
 
-const char *file_type_name[file_type_size] = {"thumbnails", "profile_photos", "photos",     "voice",
-                                              "videos",     "documents",      "secret",     "temp",
-                                              "stickers",   "music",          "animations", "secret_thumbnails",
-                                              "wallpapers", "video_notes",    "passport",   "passport"};
-
-string get_file_base_dir(const FileDirType &file_dir_type) {
+static Slice get_file_base_dir(const FileDirType &file_dir_type) {
   switch (file_dir_type) {
     case FileDirType::Secure:
-      return G()->get_dir().str();
+      return G()->get_dir();
     case FileDirType::Common:
-      return G()->get_files_dir().str();
+      return G()->get_files_dir();
     default:
       UNREACHABLE();
-      return "";
+      return Slice();
   }
 }
 
-string get_files_base_dir(FileType file_type) {
+Slice get_files_base_dir(FileType file_type) {
   return get_file_base_dir(get_file_dir_type(file_type));
 }
 string get_files_temp_dir(FileType file_type) {
-  return get_files_base_dir(file_type) + "temp" + TD_DIR_SLASH;
+  return PSTRING() << get_files_base_dir(file_type) << "temp" << TD_DIR_SLASH;
 }
 string get_files_dir(FileType file_type) {
-  return get_files_base_dir(file_type) + file_type_name[static_cast<int32>(file_type)] + TD_DIR_SLASH;
+  return PSTRING() << get_files_base_dir(file_type) << get_file_type_name(file_type) << TD_DIR_SLASH;
 }
 
 }  // namespace td

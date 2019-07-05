@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -12,6 +12,7 @@
 #include "td/utils/port/FileFd.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
+#include "td/utils/UInt.h"
 
 namespace td {
 // Types
@@ -70,7 +71,7 @@ class DataView {
   DataView &operator=(DataView &&) = delete;
 
   virtual int64 size() const = 0;
-  virtual Result<BufferSlice> pread(int64 offset, int64 size) = 0;
+  virtual Result<BufferSlice> pread(int64 offset, int64 size) const = 0;
   virtual ~DataView() = default;
 };
 
@@ -79,7 +80,7 @@ class FileDataView : public DataView {
   FileDataView(FileFd &fd, int64 size);
 
   int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) override;
+  Result<BufferSlice> pread(int64 offset, int64 size) const override;
 
  private:
   FileFd &fd_;
@@ -90,7 +91,7 @@ class BufferSliceDataView : public DataView {
  public:
   explicit BufferSliceDataView(BufferSlice buffer_slice);
   int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) override;
+  Result<BufferSlice> pread(int64 offset, int64 size) const override;
 
  private:
   BufferSlice buffer_slice_;
@@ -98,18 +99,18 @@ class BufferSliceDataView : public DataView {
 
 class ConcatDataView : public DataView {
  public:
-  ConcatDataView(DataView &left, DataView &right);
+  ConcatDataView(const DataView &left, const DataView &right);
   int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) override;
+  Result<BufferSlice> pread(int64 offset, int64 size) const override;
 
  private:
-  DataView &left_;
-  DataView &right_;
+  const DataView &left_;
+  const DataView &right_;
 };
 
 AesCbcState calc_aes_cbc_state_pbkdf2(Slice secret, Slice salt);
 AesCbcState calc_aes_cbc_state_sha512(Slice seed);
-Result<ValueHash> calc_value_hash(DataView &data_view);
+Result<ValueHash> calc_value_hash(const DataView &data_view);
 ValueHash calc_value_hash(Slice data);
 BufferSlice gen_random_prefix(int64 data_size);
 
@@ -175,14 +176,14 @@ class Decryptor {
 // Encryption
 class Encryptor : public DataView {
  public:
-  Encryptor(AesCbcState aes_cbc_state, DataView &data_view);
+  Encryptor(AesCbcState aes_cbc_state, const DataView &data_view);
   int64 size() const override;
-  Result<BufferSlice> pread(int64 offset, int64 size) override;
+  Result<BufferSlice> pread(int64 offset, int64 size) const override;
 
  private:
-  AesCbcState aes_cbc_state_;
-  int64 current_offset_{0};
-  DataView &data_view_;
+  mutable AesCbcState aes_cbc_state_;
+  mutable int64 current_offset_{0};
+  const DataView &data_view_;
 };
 
 // Main functions

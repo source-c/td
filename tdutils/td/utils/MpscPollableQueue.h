@@ -1,20 +1,18 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #pragma once
 
+#include "td/utils/common.h"
 #include "td/utils/misc.h"
 #include "td/utils/port/EventFd.h"
-#include "td/utils/SpinLock.h"
 
 #if !TD_EVENTFD_UNSUPPORTED
-#if !TD_WINDOWS
-#include <poll.h>
-#include <sched.h>
-#endif
+
+#include "td/utils/SpinLock.h"
 
 #include <utility>
 
@@ -77,21 +75,14 @@ class MpscPollableQueue {
     }
   }
 
-// Just example of usage
-#if !TD_WINDOWS
+  // Just an example of usage
   int reader_wait() {
     int res;
-
     while ((res = reader_wait_nonblock()) == 0) {
-      // TODO: reader_flush?
-      pollfd fd;
-      fd.fd = reader_get_event_fd().get_fd().get_native_fd();
-      fd.events = POLLIN;
-      poll(&fd, 1, -1);
+      reader_get_event_fd().wait(1000);
     }
     return res;
   }
-#endif
 
  private:
   SpinLock lock_;
@@ -105,7 +96,6 @@ class MpscPollableQueue {
 }  // namespace td
 
 #else
-#include "td/utils/logging.h"
 
 namespace td {
 

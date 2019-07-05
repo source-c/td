@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -13,6 +13,9 @@
 #include "td/telegram/Global.h"
 #include "td/telegram/logevent/LogEvent.h"
 #include "td/telegram/MessagesManager.h"
+#include "td/telegram/TdDb.h"
+
+#include "td/db/SqliteDb.h"
 
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
@@ -24,6 +27,10 @@
 
 namespace td {
 
+tl_object_ptr<td_api::databaseStatistics> DatabaseStats::as_td_api() const {
+  return make_tl_object<td_api::databaseStatistics>(debug);
+}
+
 StorageManager::StorageManager(ActorShared<> parent, int32 scheduler_id)
     : parent_(std::move(parent)), scheduler_id_(scheduler_id) {
 }
@@ -34,20 +41,19 @@ void StorageManager::start_up() {
 
   load_fast_stat();
 }
-void StorageManager::on_new_file(int64 size) {
-  if (size > 0) {
-    fast_stat_.cnt++;
-  } else {
-    fast_stat_.cnt--;
-  }
+
+void StorageManager::on_new_file(int64 size, int32 cnt) {
+  LOG(INFO) << "Add " << cnt << " file of size " << size << " to fast storage statistics";
+  fast_stat_.cnt += cnt;
   fast_stat_.size += size;
 
   if (fast_stat_.cnt < 0 || fast_stat_.size < 0) {
-    LOG(ERROR) << "Wrong fast stat after adding size " << size;
+    LOG(ERROR) << "Wrong fast stat after adding size " << size << " and cnt " << cnt;
     fast_stat_ = FileTypeStat();
   }
   save_fast_stat();
 }
+
 void StorageManager::get_storage_stats(int32 dialog_limit, Promise<FileStats> promise) {
   if (pending_storage_stats_.size() != 0) {
     promise.set_error(Status::Error(400, "Another storage stats is active"));
@@ -64,7 +70,18 @@ void StorageManager::get_storage_stats(int32 dialog_limit, Promise<FileStats> pr
 }
 
 void StorageManager::get_storage_stats_fast(Promise<FileStatsFast> promise) {
-  promise.set_value(FileStatsFast(fast_stat_.size, fast_stat_.cnt, get_db_size()));
+  promise.set_value(FileStatsFast(fast_stat_.size, fast_stat_.cnt, get_database_size(),
+                                  get_language_pack_database_size(), get_log_size()));
+}
+
+void StorageManager::get_database_stats(Promise<DatabaseStats> promise) {
+  //TODO: use another thread
+  auto r_stats = G()->td_db()->get_stats();
+  if (r_stats.is_error()) {
+    promise.set_error(r_stats.move_as_error());
+  } else {
+    promise.set_value(DatabaseStats(r_stats.move_as_ok()));
+  }
 }
 
 void StorageManager::update_use_storage_optimizer() {
@@ -129,18 +146,37 @@ void StorageManager::on_all_files(Result<FileStats> r_file_stats, bool dummy) {
                }));
 }
 
-int64 StorageManager::get_db_size() {
+int64 StorageManager::get_file_size(CSlice path) {
+  auto r_info = stat(path);
+  if (r_info.is_error()) {
+    return 0;
+  }
+
+  auto size = r_info.ok().size_;
+  LOG(DEBUG) << "Add file \"" << path << "\" of size " << size << " to fast storage statistics";
+  return size;
+}
+
+int64 StorageManager::get_database_size() {
   int64 size = 0;
-  auto add_path = [&](CSlice path) {
-    TRY_RESULT(info, stat(path));
-    size += info.size_;
+  G()->td_db()->with_db_path([&size](CSlice path) { size += get_file_size(path); });
+  return size;
+}
 
-    return Status::OK();
-  };
+int64 StorageManager::get_language_pack_database_size() {
+  int64 size = 0;
+  auto path = G()->shared_config().get_option_string("language_pack_database_path");
+  if (!path.empty()) {
+    SqliteDb::with_db_path(path, [&size](CSlice path) { size += get_file_size(path); });
+  }
+  return size;
+}
 
-  G()->td_db()->with_db_path([&](CSlice path) { add_path(path).ignore(); });
-  add_path(PSLICE() << G()->parameters().database_directory << "log").ignore();
-  add_path(PSLICE() << G()->parameters().database_directory << "log.old").ignore();
+int64 StorageManager::get_log_size() {
+  int64 size = 0;
+  for (auto &log_path : log_interface->get_file_paths()) {
+    size += get_file_size(log_path);
+  }
   return size;
 }
 
@@ -166,15 +202,19 @@ void StorageManager::on_gc_finished(Result<FileStats> r_file_stats, bool dummy) 
 void StorageManager::save_fast_stat() {
   G()->td_db()->get_binlog_pmc()->set("fast_file_stat", log_event_store(fast_stat_).as_slice().str());
 }
+
 void StorageManager::load_fast_stat() {
   auto status = log_event_parse(fast_stat_, G()->td_db()->get_binlog_pmc()->get("fast_file_stat"));
   if (status.is_error()) {
     fast_stat_ = FileTypeStat();
   }
+  LOG(INFO) << "Loaded fast storage statistics with " << fast_stat_.cnt << " files of total size " << fast_stat_.size;
 }
 
 void StorageManager::send_stats(FileStats &&stats, int32 dialog_limit, std::vector<Promise<FileStats>> promises) {
   fast_stat_ = stats.get_total_nontemp_stat();
+  LOG(INFO) << "Recalculate fast storage statistics to " << fast_stat_.cnt << " files of total size "
+            << fast_stat_.size;
   save_fast_stat();
 
   stats.apply_dialog_limit(dialog_limit);
@@ -209,10 +249,12 @@ uint32 StorageManager::load_last_gc_timestamp() {
   last_gc_timestamp_ = to_integer<uint32>(G()->td_db()->get_binlog_pmc()->get("files_gc_ts"));
   return last_gc_timestamp_;
 }
+
 void StorageManager::save_last_gc_timestamp() {
   last_gc_timestamp_ = static_cast<uint32>(Clocks::system());
   G()->td_db()->get_binlog_pmc()->set("files_gc_ts", to_string(last_gc_timestamp_));
 }
+
 void StorageManager::schedule_next_gc() {
   if (!G()->shared_config().get_option_boolean("use_storage_optimizer") &&
       !G()->parameters().enable_storage_optimizer) {

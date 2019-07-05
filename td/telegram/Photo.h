@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,7 +8,7 @@
 
 #include "td/telegram/DialogId.h"
 #include "td/telegram/files/FileId.h"
-#include "td/telegram/files/FileLocation.h"
+#include "td/telegram/files/FileType.h"
 #include "td/telegram/SecretInputMedia.h"
 
 #include "td/utils/buffer.h"
@@ -73,6 +73,8 @@ StringBuilder &operator<<(StringBuilder &string_builder, const ProfilePhoto &pro
 DialogPhoto get_dialog_photo(FileManager *file_manager, tl_object_ptr<telegram_api::ChatPhoto> &&chat_photo_ptr);
 tl_object_ptr<td_api::chatPhoto> get_chat_photo_object(FileManager *file_manager, const DialogPhoto *dialog_photo);
 
+vector<FileId> dialog_photo_get_file_ids(const DialogPhoto &dialog_photo);
+
 bool operator==(const DialogPhoto &lhs, const DialogPhoto &rhs);
 bool operator!=(const DialogPhoto &lhs, const DialogPhoto &rhs);
 
@@ -81,11 +83,13 @@ StringBuilder &operator<<(StringBuilder &string_builder, const DialogPhoto &dial
 PhotoSize get_thumbnail_photo_size(FileManager *file_manager, BufferSlice bytes, DialogId owner_dialog_id, int32 width,
                                    int32 height);
 PhotoSize get_photo_size(FileManager *file_manager, FileType file_type, int64 id, int64 access_hash,
-                         DialogId owner_dialog_id, tl_object_ptr<telegram_api::PhotoSize> &&size_ptr, bool is_webp);
+                         std::string upload_file_reference, DialogId owner_dialog_id,
+                         tl_object_ptr<telegram_api::PhotoSize> &&size_ptr, bool is_webp);
 PhotoSize get_web_document_photo_size(FileManager *file_manager, FileType file_type, DialogId owner_dialog_id,
                                       tl_object_ptr<telegram_api::WebDocument> web_document_ptr);
-tl_object_ptr<td_api::photoSize> get_photo_size_object(FileManager *file_manager, const PhotoSize *photo_size);
-void sort_photo_sizes(vector<td_api::object_ptr<td_api::photoSize>> &sizes);
+td_api::object_ptr<td_api::photoSize> get_photo_size_object(FileManager *file_manager, const PhotoSize *photo_size);
+vector<td_api::object_ptr<td_api::photoSize>> get_photo_sizes_object(FileManager *file_manager,
+                                                                     const vector<PhotoSize> &photo_sizes);
 
 bool operator==(const PhotoSize &lhs, const PhotoSize &rhs);
 bool operator!=(const PhotoSize &lhs, const PhotoSize &rhs);
@@ -97,7 +101,10 @@ StringBuilder &operator<<(StringBuilder &string_builder, const PhotoSize &photo_
 Photo get_photo(FileManager *file_manager, tl_object_ptr<telegram_api::photo> &&photo, DialogId owner_dialog_id);
 Photo get_photo(FileManager *file_manager, tl_object_ptr<telegram_api::encryptedFile> &&file,
                 tl_object_ptr<secret_api::decryptedMessageMediaPhoto> &&photo, DialogId owner_dialog_id);
+Photo get_web_document_photo(FileManager *file_manager, tl_object_ptr<telegram_api::WebDocument> web_document,
+                             DialogId owner_dialog_id);
 tl_object_ptr<td_api::photo> get_photo_object(FileManager *file_manager, const Photo *photo);
+tl_object_ptr<td_api::userProfilePhoto> get_user_profile_photo_object(FileManager *file_manager, const Photo *photo);
 
 void photo_delete_thumbnail(Photo &photo);
 
@@ -111,9 +118,14 @@ tl_object_ptr<telegram_api::InputMedia> photo_get_input_media(FileManager *file_
                                                               tl_object_ptr<telegram_api::InputFile> input_file,
                                                               int32 ttl);
 
+vector<FileId> photo_get_file_ids(const Photo &photo);
+
 bool operator==(const Photo &lhs, const Photo &rhs);
 bool operator!=(const Photo &lhs, const Photo &rhs);
 
 StringBuilder &operator<<(StringBuilder &string_builder, const Photo &photo);
+
+tl_object_ptr<telegram_api::userProfilePhoto> convert_photo_to_profile_photo(
+    const tl_object_ptr<telegram_api::photo> &photo);
 
 }  // namespace td

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -95,6 +95,9 @@ Result<HttpUrl> parse_url(MutableSlice url, HttpUrl::Protocol default_protocol) 
   if (host.empty()) {
     return Status::Error("URL host is empty");
   }
+  if (host == ".") {
+    return Status::Error("Host is invalid");
+  }
 
   int specified_port = port;
   if (port == 0) {
@@ -111,7 +114,7 @@ Result<HttpUrl> parse_url(MutableSlice url, HttpUrl::Protocol default_protocol) 
     query.remove_suffix(1);
   }
   if (query.empty()) {
-    query = "/";
+    query = Slice("/");
   }
   string query_str;
   if (query[0] != '/') {

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -138,12 +138,13 @@ std::string TD_TL_writer_hpp::gen_function_result_type(const tl::tl_tree *result
 }
 
 std::string TD_TL_writer_hpp::gen_fetch_function_begin(const std::string &parser_name, const std::string &class_name,
-                                                       int arity, std::vector<tl::var_description> &vars,
-                                                       int parser_type) const {
+                                                       const std::string &parent_class_name, int arity,
+                                                       std::vector<tl::var_description> &vars, int parser_type) const {
   return "";
 }
 
-std::string TD_TL_writer_hpp::gen_fetch_function_end(int field_num, const std::vector<tl::var_description> &vars,
+std::string TD_TL_writer_hpp::gen_fetch_function_end(bool has_parent, int field_num,
+                                                     const std::vector<tl::var_description> &vars,
                                                      int parser_type) const {
   return "";
 }

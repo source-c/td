@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -52,6 +52,9 @@ class Timestamp {
   static Timestamp at(double timeout) {
     return Timestamp{timeout};
   }
+  static Timestamp at_unix(double timeout) {
+    return Timestamp{timeout - td::Clocks::system() + Time::now()};
+  }
 
   static Timestamp in(double timeout) {
     return Timestamp{Time::now_cached() + timeout};
@@ -91,14 +94,14 @@ class Timestamp {
   }
 };
 
-template <class T>
-void parse(Timestamp &timestamp, T &parser) {
-  timestamp = Timestamp::in(parser.fetch_double() - Clocks::system());
+template <class StorerT>
+void store(const Timestamp &timestamp, StorerT &storer) {
+  storer.store_binary(timestamp.at() - Time::now() + Clocks::system());
 }
 
-template <class T>
-void store(const Timestamp &timestamp, T &storer) {
-  storer.store_binary(timestamp.at() - Time::now() + Clocks::system());
+template <class ParserT>
+void parse(Timestamp &timestamp, ParserT &parser) {
+  timestamp = Timestamp::in(parser.fetch_double() - Clocks::system());
 }
 
 }  // namespace td

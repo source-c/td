@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,7 +7,6 @@
 #pragma once
 
 #include "td/utils/common.h"
-#include "td/utils/logging.h"
 
 #include <array>
 #include <atomic>
@@ -20,7 +19,12 @@ class HazardPointers {
   explicit HazardPointers(size_t threads_n) : threads_(threads_n) {
     for (auto &data : threads_) {
       for (auto &ptr : data.hazard) {
+// workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=64658
+#if TD_GCC && GCC_VERSION <= 40902
         ptr = nullptr;
+#else
+        std::atomic_init(&ptr, static_cast<T *>(nullptr));
+#endif
       }
     }
   }
@@ -60,7 +64,7 @@ class HazardPointers {
     CHECK(thread_id < threads_.size());
     auto &data = threads_[thread_id];
     if (ptr) {
-      data.to_delete.push_back(std::unique_ptr<T>(ptr));
+      data.to_delete.push_back(unique_ptr<T>(ptr));
     }
     for (auto it = data.to_delete.begin(); it != data.to_delete.end();) {
       if (!is_protected(it->get())) {
@@ -94,8 +98,8 @@ class HazardPointers {
     char pad[TD_CONCURRENCY_PAD - sizeof(std::array<std::atomic<T *>, MaxPointersN>)];
 
     // stupid gc
-    std::vector<std::unique_ptr<T>> to_delete;
-    char pad2[TD_CONCURRENCY_PAD - sizeof(std::vector<std::unique_ptr<T>>)];
+    std::vector<unique_ptr<T>> to_delete;
+    char pad2[TD_CONCURRENCY_PAD - sizeof(std::vector<unique_ptr<T>>)];
   };
   std::vector<ThreadData> threads_;
   char pad2[TD_CONCURRENCY_PAD - sizeof(std::vector<ThreadData>)];

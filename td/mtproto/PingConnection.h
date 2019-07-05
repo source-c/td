@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,31 +8,34 @@
 
 #include "td/mtproto/AuthKey.h"
 #include "td/mtproto/NoCryptoStorer.h"
+#include "td/mtproto/PacketInfo.h"
+#include "td/mtproto/PacketStorer.h"
 #include "td/mtproto/RawConnection.h"
 #include "td/mtproto/utils.h"
 
+#include "td/mtproto/mtproto_api.h"
+
 #include "td/utils/buffer.h"
-#include "td/utils/port/Fd.h"
+#include "td/utils/port/detail/PollableFd.h"
 #include "td/utils/Random.h"
 #include "td/utils/Status.h"
 #include "td/utils/Time.h"
-
-#include "td/mtproto/mtproto_api.h"
+#include "td/utils/UInt.h"
 
 namespace td {
 namespace mtproto {
 
 class PingConnection : private RawConnection::Callback {
  public:
-  PingConnection(std::unique_ptr<RawConnection> raw_connection, size_t ping_count)
+  PingConnection(unique_ptr<RawConnection> raw_connection, size_t ping_count)
       : raw_connection_(std::move(raw_connection)), ping_count_(ping_count) {
   }
 
-  Fd &get_pollable() {
-    return raw_connection_->get_pollable();
+  PollableFdInfo &get_poll_info() {
+    return raw_connection_->get_poll_info();
   }
 
-  std::unique_ptr<RawConnection> move_as_raw_connection() {
+  unique_ptr<RawConnection> move_as_raw_connection() {
     return std::move(raw_connection_);
   }
 
@@ -76,7 +79,7 @@ class PingConnection : private RawConnection::Callback {
   }
 
  private:
-  std::unique_ptr<RawConnection> raw_connection_;
+  unique_ptr<RawConnection> raw_connection_;
   size_t ping_count_ = 1;
   double start_time_ = 0.0;
   double finish_time_ = 0.0;

@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -38,4 +38,5 @@ TEST(Misc, clean_filename) {
   ASSERT_STREQ(clean_filename("test.exe01234567890123456789...."),
                "test.exe01234567890123456789");  // extension may be more then 20 characters
   ASSERT_STREQ(clean_filename("....test....asdf"), "test.asdf");
+  ASSERT_STREQ(clean_filename("കറുപ്പ്.txt"), "കറപപ.txt");
 }

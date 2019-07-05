@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -31,6 +31,7 @@ class GetBotCallbackAnswerQuery : public Td::ResultHandler {
   Promise<Unit> promise_;
   int64 result_id_;
   DialogId dialog_id_;
+  MessageId message_id_;
 
  public:
   explicit GetBotCallbackAnswerQuery(Promise<Unit> &&promise) : promise_(std::move(promise)) {
@@ -40,6 +41,7 @@ class GetBotCallbackAnswerQuery : public Td::ResultHandler {
             int64 result_id) {
     result_id_ = result_id;
     dialog_id_ = dialog_id;
+    message_id_ = message_id;
 
     auto input_peer = td->messages_manager_->get_input_peer(dialog_id, AccessRights::Read);
     CHECK(input_peer != nullptr);
@@ -76,6 +78,9 @@ class GetBotCallbackAnswerQuery : public Td::ResultHandler {
   }
 
   void on_error(uint64 id, Status status) override {
+    if (status.message() == "DATA_INVALID") {
+      td->messages_manager_->get_message_from_server({dialog_id_, message_id_}, Auto());
+    }
     td->messages_manager_->on_get_dialog_error(dialog_id_, status, "GetBotCallbackAnswerQuery");
     td->callback_queries_manager_->on_get_callback_query_answer(result_id_, nullptr);
     promise_.set_error(std::move(status));
@@ -226,12 +231,13 @@ int64 CallbackQueriesManager::send_callback_query(FullMessageId full_message_id,
   }
 
   auto dialog_id = full_message_id.get_dialog_id();
+  td_->messages_manager_->have_dialog_force(dialog_id);
   if (!td_->messages_manager_->have_input_peer(dialog_id, AccessRights::Read)) {
     promise.set_error(Status::Error(5, "Can't access the chat"));
     return 0;
   }
 
-  if (!td_->messages_manager_->have_message(full_message_id)) {
+  if (!td_->messages_manager_->have_message(full_message_id, "send_callback_query")) {
     promise.set_error(Status::Error(5, "Message not found"));
     return 0;
   }

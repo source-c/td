@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -16,8 +16,7 @@
 #include "td/telegram/ConfigShared.h"
 #include "td/telegram/Global.h"
 #include "td/telegram/Td.h"
-
-#include "td/db/Pmc.h"
+#include "td/telegram/TdDb.h"
 
 #include "td/utils/common.h"
 #include "td/utils/format.h"
@@ -127,16 +126,18 @@ Status NetQueryDispatcher::wait_dc_init(DcId dc_id, bool force) {
 
   if (should_init) {
     std::lock_guard<std::mutex> guard(main_dc_id_mutex_);
-    if (stop_flag_.load(std::memory_order_relaxed)) {
+    if (stop_flag_.load(std::memory_order_relaxed) || need_destroy_auth_key_) {
       return Status::Error("Closing");
     }
     // init dc
+    dc.id_ = dc_id;
     decltype(common_public_rsa_key_) public_rsa_key;
     bool is_cdn = false;
+    bool need_destroy_key = false;
     if (dc_id.is_internal()) {
       public_rsa_key = common_public_rsa_key_;
     } else {
-      public_rsa_key = std::make_shared<PublicRsaKeyShared>(dc_id);
+      public_rsa_key = std::make_shared<PublicRsaKeyShared>(dc_id, G()->is_test_dc());
       send_closure_later(public_rsa_key_watchdog_, &PublicRsaKeyWatchdog::add_public_rsa_key, public_rsa_key);
       is_cdn = true;
     }
@@ -150,18 +151,18 @@ Status NetQueryDispatcher::wait_dc_init(DcId dc_id, bool force) {
     int32 upload_session_count = raw_dc_id != 2 && raw_dc_id != 4 ? 8 : 4;
     int32 download_session_count = 2;
     int32 download_small_session_count = 2;
-    dc.main_session_ =
-        create_actor<SessionMultiProxy>(PSLICE() << "SessionMultiProxy:" << raw_dc_id << ":main", session_count,
-                                        auth_data, raw_dc_id == main_dc_id_, use_pfs, false, false, is_cdn);
+    dc.main_session_ = create_actor<SessionMultiProxy>(PSLICE() << "SessionMultiProxy:" << raw_dc_id << ":main",
+                                                       session_count, auth_data, raw_dc_id == main_dc_id_, use_pfs,
+                                                       false, false, is_cdn, need_destroy_key);
     dc.upload_session_ = create_actor_on_scheduler<SessionMultiProxy>(
         PSLICE() << "SessionMultiProxy:" << raw_dc_id << ":upload", slow_net_scheduler_id, upload_session_count,
-        auth_data, false, use_pfs, false, true, is_cdn);
+        auth_data, false, use_pfs, false, true, is_cdn, need_destroy_key);
     dc.download_session_ = create_actor_on_scheduler<SessionMultiProxy>(
         PSLICE() << "SessionMultiProxy:" << raw_dc_id << ":download", slow_net_scheduler_id, download_session_count,
-        auth_data, false, use_pfs, true, true, is_cdn);
+        auth_data, false, use_pfs, true, true, is_cdn, need_destroy_key);
     dc.download_small_session_ = create_actor_on_scheduler<SessionMultiProxy>(
         PSLICE() << "SessionMultiProxy:" << raw_dc_id << ":download_small", slow_net_scheduler_id,
-        download_small_session_count, auth_data, false, use_pfs, true, true, is_cdn);
+        download_small_session_count, auth_data, false, use_pfs, true, true, is_cdn, need_destroy_key);
     dc.is_inited_ = true;
     if (dc_id.is_internal()) {
       send_closure_later(dc_auth_manager_, &DcAuthManager::add_dc, std::move(auth_data));
@@ -212,6 +213,18 @@ void NetQueryDispatcher::update_session_count() {
     }
   }
 }
+void NetQueryDispatcher::destroy_auth_keys(Promise<> promise) {
+  std::lock_guard<std::mutex> guard(main_dc_id_mutex_);
+  LOG(INFO) << "Destory auth keys";
+  need_destroy_auth_key_ = true;
+  for (size_t i = 1; i < MAX_DC_COUNT; i++) {
+    if (is_dc_inited(narrow_cast<int32>(i)) && dcs_[i - 1].id_.is_internal()) {
+      send_closure_later(dcs_[i - 1].main_session_, &SessionMultiProxy::update_destroy_auth_key,
+                         need_destroy_auth_key_);
+    }
+  }
+  send_closure_later(dc_auth_manager_, &DcAuthManager::destroy, std::move(promise));
+}
 
 void NetQueryDispatcher::update_use_pfs() {
   std::lock_guard<std::mutex> guard(main_dc_id_mutex_);
@@ -239,7 +252,7 @@ void NetQueryDispatcher::update_mtproto_header() {
 }
 
 void NetQueryDispatcher::update_valid_dc(DcId dc_id) {
-  wait_dc_init(dc_id, true);
+  wait_dc_init(dc_id, true).ignore();
 }
 
 bool NetQueryDispatcher::is_dc_inited(int32 raw_dc_id) {
@@ -261,7 +274,7 @@ NetQueryDispatcher::NetQueryDispatcher(std::function<ActorShared<>()> create_ref
   LOG(INFO) << tag("main_dc_id", main_dc_id_.load(std::memory_order_relaxed));
   delayer_ = create_actor<NetQueryDelayer>("NetQueryDelayer", create_reference());
   dc_auth_manager_ = create_actor<DcAuthManager>("DcAuthManager", create_reference());
-  common_public_rsa_key_ = std::make_shared<PublicRsaKeyShared>(DcId::empty());
+  common_public_rsa_key_ = std::make_shared<PublicRsaKeyShared>(DcId::empty(), G()->is_test_dc());
   public_rsa_key_watchdog_ = create_actor<PublicRsaKeyWatchdog>("PublicRsaKeyWatchdog", create_reference());
 
   td_guard_ = create_shared_lambda_guard([actor = create_reference()] {});

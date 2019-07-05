@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -15,15 +15,25 @@ namespace td {
 
 class HttpUrl {
  public:
-  enum class Protocol { HTTP, HTTPS } protocol_;
+  enum class Protocol { HTTP, HTTPS } protocol_ = Protocol::HTTP;
   string userinfo_;
   string host_;
-  bool is_ipv6_;
-  int specified_port_;
-  int port_;
+  bool is_ipv6_ = false;
+  int specified_port_ = 0;
+  int port_ = 0;
   string query_;
 
   string get_url() const;
+
+  HttpUrl(Protocol protocol, string userinfo, string host, bool is_ipv6, int specified_port, int port, string query)
+      : protocol_(protocol)
+      , userinfo_(std::move(userinfo))
+      , host_(std::move(host))
+      , is_ipv6_(is_ipv6)
+      , specified_port_(specified_port)
+      , port_(port)
+      , query_(std::move(query)) {
+  }
 };
 
 // TODO Slice instead of MutableSlice

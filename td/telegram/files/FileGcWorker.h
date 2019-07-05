@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -10,10 +10,14 @@
 #include "td/actor/PromiseFuture.h"
 
 #include "td/telegram/files/FileGcParameters.h"
-#include "td/telegram/files/FileLocation.h"
 #include "td/telegram/files/FileStats.h"
 
+#include "td/utils/logging.h"
+
 namespace td {
+
+extern int VERBOSITY_NAME(file_gc);
+
 class FileGcWorker : public Actor {
  public:
   explicit FileGcWorker(ActorShared<> parent) : parent_(std::move(parent)) {

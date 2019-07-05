@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,25 +11,33 @@
 
 #include "td/telegram/files/FileGcWorker.h"
 #include "td/telegram/files/FileStats.h"
+#include "td/telegram/files/FileStatsWorker.h"
+#include "td/telegram/td_api.h"
 
 #include "td/utils/common.h"
+#include "td/utils/Slice.h"
 #include "td/utils/Status.h"
 
 namespace td {
-class FileStatsWorker;
-class FileGcWorker;
-}  // namespace td
 
-namespace td {
+struct DatabaseStats {
+  string debug;
+  DatabaseStats() = default;
+  explicit DatabaseStats(string debug) : debug(debug) {
+  }
+  tl_object_ptr<td_api::databaseStatistics> as_td_api() const;
+};
 
 class StorageManager : public Actor {
  public:
   StorageManager(ActorShared<> parent, int32 scheduler_id);
   void get_storage_stats(int32 dialog_limit, Promise<FileStats> promise);
   void get_storage_stats_fast(Promise<FileStatsFast> promise);
+  void get_database_stats(Promise<DatabaseStats> promise);
   void run_gc(FileGcParameters parameters, Promise<FileStats> promise);
   void update_use_storage_optimizer();
-  void on_new_file(int64 size);
+
+  void on_new_file(int64 size, int32 cnt);
 
  private:
   static constexpr uint32 GC_EACH = 60 * 60 * 24;  // 1 day
@@ -53,7 +61,10 @@ class StorageManager : public Actor {
 
   void save_fast_stat();
   void load_fast_stat();
-  static int64 get_db_size();
+  static int64 get_database_size();
+  static int64 get_language_pack_database_size();
+  static int64 get_log_size();
+  static int64 get_file_size(CSlice path);
 
   // RefCnt
   int32 ref_cnt_{1};

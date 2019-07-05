@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -37,7 +37,7 @@ Status Gzip::init_encode() {
   mode_ = Encode;
   int ret = deflateInit2(&impl_->stream_, 6, Z_DEFLATED, 15, MAX_MEM_LEVEL, Z_DEFAULT_STRATEGY);
   if (ret != Z_OK) {
-    return Status::Error("zlib deflate init failed");
+    return Status::Error(PSLICE() << "zlib deflate init failed: " << ret);
   }
   return Status::OK();
 }
@@ -48,7 +48,7 @@ Status Gzip::init_decode() {
   mode_ = Decode;
   int ret = inflateInit2(&impl_->stream_, MAX_WBITS + 32);
   if (ret != Z_OK) {
-    return Status::Error("zlib inflate init failed");
+    return Status::Error(PSLICE() << "zlib inflate init failed: " << ret);
   }
   return Status::OK();
 }
@@ -140,7 +140,7 @@ Gzip::~Gzip() {
 BufferSlice gzdecode(Slice s) {
   Gzip gzip;
   gzip.init_decode().ensure();
-  auto message = ChainBufferWriter::create_empty();
+  ChainBufferWriter message;
   gzip.set_input(s);
   gzip.close_input();
   double k = 2;

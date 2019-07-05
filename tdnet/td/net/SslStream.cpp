@@ -1,11 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/net/SslStream.h"
 
+#include "td/utils/common.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/port/wstring_convert.h"
@@ -251,12 +252,18 @@ class SslStreamImpl {
           X509 *x509 = d2i_X509(nullptr, &in, static_cast<long>(cert_context->cbCertEncoded));
           if (x509 != nullptr) {
             if (X509_STORE_add_cert(store, x509) != 1) {
-              LOG(ERROR) << "Failed to add certificate";
+              auto error_code = ERR_peek_error();
+              auto error = create_openssl_error(-20, "Failed to add certificate");
+              if (ERR_GET_REASON(error_code) != X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+                LOG(ERROR) << error;
+              } else {
+                LOG(INFO) << error;
+              }
             }
 
             X509_free(x509);
           } else {
-            LOG(ERROR) << "Failed to load X509 certificate";
+            LOG(ERROR) << create_openssl_error(-21, "Failed to load X509 certificate");
           }
         }
 
@@ -265,7 +272,7 @@ class SslStreamImpl {
         SSL_CTX_set_cert_store(ssl_ctx, store);
         LOG(DEBUG) << "End to load system store";
       } else {
-        LOG(ERROR) << "Failed to open system certificate store";
+        LOG(ERROR) << create_openssl_error(-22, "Failed to open system certificate store");
       }
 #else
       if (SSL_CTX_set_default_verify_paths(ssl_ctx) == 0) {
@@ -279,7 +286,7 @@ class SslStreamImpl {
 #endif
     } else {
       if (SSL_CTX_load_verify_locations(ssl_ctx, cert_file.c_str(), nullptr) == 0) {
-        return create_openssl_error(-8, "Failed to set custom cert file");
+        return create_openssl_error(-8, "Failed to set custom certificate file");
       }
     }
 
@@ -514,11 +521,11 @@ SslStream &SslStream::operator=(SslStream &&) = default;
 SslStream::~SslStream() = default;
 
 Result<SslStream> SslStream::create(CSlice host, CSlice cert_file, VerifyPeer verify_peer) {
-  auto impl = std::make_unique<detail::SslStreamImpl>();
+  auto impl = make_unique<detail::SslStreamImpl>();
   TRY_STATUS(impl->init(host, cert_file, verify_peer));
   return SslStream(std::move(impl));
 }
-SslStream::SslStream(std::unique_ptr<detail::SslStreamImpl> impl) : impl_(std::move(impl)) {
+SslStream::SslStream(unique_ptr<detail::SslStreamImpl> impl) : impl_(std::move(impl)) {
 }
 ByteFlowInterface &SslStream::read_byte_flow() {
   return impl_->read_byte_flow();

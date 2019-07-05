@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -28,6 +28,10 @@
 
 #if TD_HAVE_ZLIB
 #include <zlib.h>
+#endif
+
+#if TD_HAVE_CRC32C
+#include "crc32c/crc32c.h"
 #endif
 
 #include <algorithm>
@@ -296,10 +300,11 @@ void AesCbcState::decrypt(Slice from, MutableSlice to) {
 class AesCtrState::Impl {
  public:
   Impl(const UInt256 &key, const UInt128 &iv) {
+    static_assert(AES_BLOCK_SIZE == 16, "");
     if (AES_set_encrypt_key(key.raw, 256, &aes_key) < 0) {
       LOG(FATAL) << "Failed to set encrypt key";
     }
-    MutableSlice(counter, AES_BLOCK_SIZE).copy_from({iv.raw, AES_BLOCK_SIZE});
+    MutableSlice(counter, AES_BLOCK_SIZE).copy_from(as_slice(iv));
     current_pos = 0;
   }
 
@@ -332,7 +337,7 @@ AesCtrState &AesCtrState::operator=(AesCtrState &&from) = default;
 AesCtrState::~AesCtrState() = default;
 
 void AesCtrState::init(const UInt256 &key, const UInt128 &iv) {
-  ctx_ = std::make_unique<AesCtrState::Impl>(key, iv);
+  ctx_ = make_unique<AesCtrState::Impl>(key, iv);
 }
 
 void AesCtrState::encrypt(Slice from, MutableSlice to) {
@@ -382,7 +387,7 @@ Sha256State &Sha256State::operator=(Sha256State &&from) = default;
 Sha256State::~Sha256State() = default;
 
 void sha256_init(Sha256State *state) {
-  state->impl = std::make_unique<Sha256StateImpl>();
+  state->impl = make_unique<Sha256StateImpl>();
   int err = SHA256_Init(&state->impl->ctx);
   LOG_IF(FATAL, err != 1);
 }
@@ -627,6 +632,12 @@ void init_openssl_threads() {
 #if TD_HAVE_ZLIB
 uint32 crc32(Slice data) {
   return static_cast<uint32>(::crc32(0, data.ubegin(), static_cast<uint32>(data.size())));
+}
+#endif
+
+#if TD_HAVE_CRC32C
+uint32 crc32c(Slice data) {
+  return crc32c::Crc32c(data.data(), data.size());
 }
 #endif
 

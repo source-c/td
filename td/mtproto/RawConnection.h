@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -7,28 +7,26 @@
 #pragma once
 
 #include "td/mtproto/IStreamTransport.h"
+#include "td/mtproto/PacketInfo.h"
+#include "td/mtproto/TransportType.h"
 
 #include "td/utils/buffer.h"
 #include "td/utils/BufferedFd.h"
 #include "td/utils/common.h"
-#include "td/utils/port/Fd.h"
+#include "td/utils/port/detail/PollableFd.h"
 #include "td/utils/port/SocketFd.h"
 #include "td/utils/Status.h"
+#include "td/utils/StorerBase.h"
 
 #include "td/telegram/StateManager.h"
 
 #include <map>
 
 namespace td {
-class Storer;
 namespace mtproto {
-class AuthKey;
-struct PacketInfo;
-}  // namespace mtproto
-}  // namespace td
 
-namespace td {
-namespace mtproto {
+class AuthKey;
+
 class RawConnection {
  public:
   class StatsCallback {
@@ -42,7 +40,7 @@ class RawConnection {
     virtual void on_mtproto_error() = 0;
   };
   RawConnection() = default;
-  RawConnection(SocketFd socket_fd, TransportType transport_type, std::unique_ptr<StatsCallback> stats_callback)
+  RawConnection(SocketFd socket_fd, TransportType transport_type, unique_ptr<StatsCallback> stats_callback)
       : socket_fd_(std::move(socket_fd))
       , transport_(create_transport(transport_type))
       , stats_callback_(std::move(stats_callback)) {
@@ -63,8 +61,8 @@ class RawConnection {
                    uint64 quick_ack_token = 0);
   uint64 send_no_crypto(const Storer &storer);
 
-  Fd &get_pollable() {
-    return socket_fd_.get_fd();
+  PollableFdInfo &get_poll_info() {
+    return socket_fd_.get_poll_info();
   }
   StatsCallback *stats_callback() {
     return stats_callback_.get();
@@ -82,6 +80,8 @@ class RawConnection {
     }
     virtual Status before_write() {
       return Status::OK();
+    }
+    virtual void on_read(size_t size) {
     }
   };
 
@@ -116,7 +116,7 @@ class RawConnection {
   std::map<uint32, uint64> quick_ack_to_token_;
   bool has_error_{false};
 
-  std::unique_ptr<StatsCallback> stats_callback_;
+  unique_ptr<StatsCallback> stats_callback_;
 
   StateManager::ConnectionToken connection_token_;
 

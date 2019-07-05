@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,6 +8,7 @@
 
 #include "td/telegram/AuthManager.h"
 
+#include "td/telegram/SendCodeHelper.hpp"
 #include "td/telegram/Version.h"
 
 #include "td/utils/format.h"
@@ -16,46 +17,8 @@
 
 namespace td {
 
-template <class T>
-void SendCodeHelper::AuthenticationCodeInfo::store(T &storer) const {
-  using td::store;
-  store(type, storer);
-  store(length, storer);
-  store(pattern, storer);
-}
-
-template <class T>
-void SendCodeHelper::AuthenticationCodeInfo::parse(T &parser) {
-  using td::parse;
-  parse(type, parser);
-  parse(length, parser);
-  parse(pattern, parser);
-}
-
-template <class T>
-void SendCodeHelper::store(T &storer) const {
-  using td::store;
-  store(phone_number_, storer);
-  store(phone_registered_, storer);
-  store(phone_code_hash_, storer);
-  store(sent_code_info_, storer);
-  store(next_code_info_, storer);
-  store(next_code_timestamp_, storer);
-}
-
-template <class T>
-void SendCodeHelper::parse(T &parser) {
-  using td::parse;
-  parse(phone_number_, parser);
-  parse(phone_registered_, parser);
-  parse(phone_code_hash_, parser);
-  parse(sent_code_info_, parser);
-  parse(next_code_info_, parser);
-  parse(next_code_timestamp_, parser);
-}
-
-template <class T>
-void AuthManager::WaitPasswordState::store(T &storer) const {
+template <class StorerT>
+void AuthManager::WaitPasswordState::store(StorerT &storer) const {
   using td::store;
   store(current_client_salt_, storer);
   store(current_server_salt_, storer);
@@ -68,8 +31,8 @@ void AuthManager::WaitPasswordState::store(T &storer) const {
   store(email_address_pattern_, storer);
 }
 
-template <class T>
-void AuthManager::WaitPasswordState::parse(T &parser) {
+template <class ParserT>
+void AuthManager::WaitPasswordState::parse(ParserT &parser) {
   using td::parse;
   parse(current_client_salt_, parser);
   parse(current_server_salt_, parser);
@@ -82,8 +45,8 @@ void AuthManager::WaitPasswordState::parse(T &parser) {
   parse(email_address_pattern_, parser);
 }
 
-template <class T>
-void AuthManager::DbState::store(T &storer) const {
+template <class StorerT>
+void AuthManager::DbState::store(StorerT &storer) const {
   using td::store;
   bool has_terms_of_service = !terms_of_service_.get_id().empty();
   bool is_pbkdf2_supported = true;
@@ -111,8 +74,8 @@ void AuthManager::DbState::store(T &storer) const {
   }
 }
 
-template <class T>
-void AuthManager::DbState::parse(T &parser) {
+template <class ParserT>
+void AuthManager::DbState::parse(ParserT &parser) {
   using td::parse;
   bool has_terms_of_service = false;
   bool is_pbkdf2_supported = false;

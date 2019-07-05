@@ -1,11 +1,12 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/telegram/TopDialogManager.h"
 
+#include "td/telegram/AuthManager.h"
 #include "td/telegram/ConfigShared.h"
 #include "td/telegram/ContactsManager.h"
 #include "td/telegram/DialogId.h"
@@ -17,7 +18,9 @@
 #include "td/telegram/net/NetQueryDispatcher.h"
 #include "td/telegram/StateManager.h"
 #include "td/telegram/Td.h"
+#include "td/telegram/TdDb.h"
 
+#include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/port/Clocks.h"
 #include "td/utils/ScopeGuard.h"
@@ -91,6 +94,11 @@ static tl_object_ptr<telegram_api::TopPeerCategory> top_dialog_category_as_teleg
 }
 
 void TopDialogManager::update_is_enabled(bool is_enabled) {
+  auto auth_manager = G()->td().get_actor_unsafe()->auth_manager_.get();
+  if (auth_manager == nullptr || !auth_manager->is_authorized() || auth_manager->is_bot()) {
+    return;
+  }
+
   if (set_is_enabled(is_enabled)) {
     G()->td_db()->get_binlog_pmc()->set("top_peers_enabled", is_enabled ? "1" : "0");
     send_toggle_top_peers(is_enabled);
@@ -219,32 +227,32 @@ void TopDialogManager::update_rating_e_decay() {
   rating_e_decay_ = G()->shared_config().get_option_integer("rating_e_decay", rating_e_decay_);
 }
 
-template <class T>
-void parse(TopDialogManager::TopDialog &top_dialog, T &parser) {
-  using ::td::parse;
-  parse(top_dialog.dialog_id, parser);
-  parse(top_dialog.rating, parser);
-}
-
-template <class T>
-void store(const TopDialogManager::TopDialog &top_dialog, T &storer) {
+template <class StorerT>
+void store(const TopDialogManager::TopDialog &top_dialog, StorerT &storer) {
   using ::td::store;
   store(top_dialog.dialog_id, storer);
   store(top_dialog.rating, storer);
 }
 
-template <class T>
-void parse(TopDialogManager::TopDialogs &top_dialogs, T &parser) {
+template <class ParserT>
+void parse(TopDialogManager::TopDialog &top_dialog, ParserT &parser) {
   using ::td::parse;
-  parse(top_dialogs.rating_timestamp, parser);
-  parse(top_dialogs.dialogs, parser);
+  parse(top_dialog.dialog_id, parser);
+  parse(top_dialog.rating, parser);
 }
 
-template <class T>
-void store(const TopDialogManager::TopDialogs &top_dialogs, T &storer) {
+template <class StorerT>
+void store(const TopDialogManager::TopDialogs &top_dialogs, StorerT &storer) {
   using ::td::store;
   store(top_dialogs.rating_timestamp, storer);
   store(top_dialogs.dialogs, storer);
+}
+
+template <class ParserT>
+void parse(TopDialogManager::TopDialogs &top_dialogs, ParserT &parser) {
+  using ::td::parse;
+  parse(top_dialogs.rating_timestamp, parser);
+  parse(top_dialogs.dialogs, parser);
 }
 
 double TopDialogManager::rating_add(double now, double rating_timestamp) const {
@@ -286,9 +294,21 @@ void TopDialogManager::do_get_top_dialogs(GetTopDialogsQuery &&query) {
           LOG(INFO) << "Skip deleted " << user_id;
           continue;
         }
-        if (G()->td().get_actor_unsafe()->contacts_manager_->get_my_id("do_get_top_dialogs") == user_id) {
+        if (G()->td().get_actor_unsafe()->contacts_manager_->get_my_id() == user_id) {
           LOG(INFO) << "Skip self " << user_id;
           continue;
+        }
+        if (query.category == TopDialogCategory::BotInline || query.category == TopDialogCategory::BotPM) {
+          auto r_bot_info = G()->td().get_actor_unsafe()->contacts_manager_->get_bot_data(user_id);
+          if (r_bot_info.is_error()) {
+            LOG(INFO) << "Skip not a bot " << user_id;
+            continue;
+          }
+          if (query.category == TopDialogCategory::BotInline &&
+              (r_bot_info.ok().username.empty() || !r_bot_info.ok().is_inline)) {
+            LOG(INFO) << "Skip not inline bot " << user_id;
+            continue;
+          }
         }
       }
 
@@ -389,7 +409,7 @@ void TopDialogManager::on_result(NetQueryPtr net_query) {
   };
 
   auto top_peers_parent = r_top_peers.move_as_ok();
-  LOG(DEBUG) << "contacts_getTopPeers returned " << to_string(top_peers_parent);
+  LOG(DEBUG) << "Receive contacts_getTopPeers result: " << to_string(top_peers_parent);
   switch (top_peers_parent->get_id()) {
     case telegram_api::contacts_topPeersNotModified::ID:
       // nothing to do
@@ -403,8 +423,10 @@ void TopDialogManager::on_result(NetQueryPtr net_query) {
       set_is_enabled(true);  // apply immediately
       auto top_peers = move_tl_object_as<telegram_api::contacts_topPeers>(std::move(top_peers_parent));
 
-      send_closure(G()->contacts_manager(), &ContactsManager::on_get_users, std::move(top_peers->users_));
-      send_closure(G()->contacts_manager(), &ContactsManager::on_get_chats, std::move(top_peers->chats_));
+      send_closure(G()->contacts_manager(), &ContactsManager::on_get_users, std::move(top_peers->users_),
+                   "on get top chats");
+      send_closure(G()->contacts_manager(), &ContactsManager::on_get_chats, std::move(top_peers->chats_),
+                   "on get top chats");
       for (auto &category : top_peers->categories_) {
         auto dialog_category = top_dialog_category_from_telegram_api(*category->category_);
         auto pos = static_cast<size_t>(dialog_category);
@@ -447,7 +469,16 @@ void TopDialogManager::do_save_top_dialogs() {
 }
 
 void TopDialogManager::start_up() {
-  is_active_ = G()->parameters().use_chat_info_db;
+  do_start_up();
+}
+
+void TopDialogManager::do_start_up() {
+  auto auth_manager = G()->td().get_actor_unsafe()->auth_manager_.get();
+  if (auth_manager == nullptr || !auth_manager->is_authorized()) {
+    return;
+  }
+
+  is_active_ = G()->parameters().use_chat_info_db && !auth_manager->is_bot();
   is_enabled_ = !G()->shared_config().get_option_boolean("disable_top_chats");
   update_rating_e_decay();
 
@@ -511,6 +542,10 @@ void TopDialogManager::init() {
 
 void TopDialogManager::on_first_sync() {
   was_first_sync_ = true;
+  if (!G()->close_flag() && G()->td().get_actor_unsafe()->auth_manager_->is_bot()) {
+    is_active_ = false;
+    init();
+  }
   loop();
 }
 
@@ -544,7 +579,7 @@ void TopDialogManager::loop() {
   }
 
   if (is_enabled_) {
-    // db sync
+    // database sync
     Timestamp db_sync_timeout;
     if (db_sync_state_ == SyncState::Ok) {
       if (first_unsync_change_) {

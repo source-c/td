@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -15,12 +15,15 @@
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
 
+#include "td/utils/logging.h"
 #include "td/utils/port/IPAddress.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
 #include "td/utils/Time.h"
 
 namespace td {
+
+extern int VERBOSITY_NAME(config_recoverer);
 
 class ConfigShared;
 
@@ -52,7 +55,7 @@ class ConfigManager : public NetQueryCallback {
   int32 config_sent_cnt_{0};
   ActorOwn<ConfigRecoverer> config_recoverer_;
   int ref_cnt_{1};
-  Timestamp expire_;
+  Timestamp expire_time_;
 
   void start_up() override;
   void hangup_shared() override;
@@ -65,9 +68,10 @@ class ConfigManager : public NetQueryCallback {
   void request_config_from_dc_impl(DcId dc_id);
   void process_config(tl_object_ptr<telegram_api::config> config);
 
-  Timestamp load_config_expire();
+  Timestamp load_config_expire_time();
   void save_config_expire(Timestamp timestamp);
   void save_dc_options_update(DcOptions dc_options);
   DcOptions load_dc_options_update();
 };
+
 }  // namespace td

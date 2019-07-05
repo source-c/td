@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -17,10 +17,13 @@
 #include "td/telegram/StateManager.h"
 #include "td/telegram/UniqueId.h"
 
+#include "td/mtproto/crypto.h"
+#include "td/mtproto/DhHandshake.h"
 #include "td/mtproto/Handshake.h"
 #include "td/mtproto/HandshakeActor.h"
 #include "td/mtproto/RawConnection.h"
 #include "td/mtproto/SessionConnection.h"
+#include "td/mtproto/TransportType.h"
 
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
@@ -41,12 +44,13 @@ namespace detail {
 
 class GenAuthKeyActor : public Actor {
  public:
-  GenAuthKeyActor(std::unique_ptr<mtproto::AuthKeyHandshake> handshake,
-                  std::unique_ptr<mtproto::AuthKeyHandshakeContext> context,
-                  Promise<std::unique_ptr<mtproto::RawConnection>> connection_promise,
-                  Promise<std::unique_ptr<mtproto::AuthKeyHandshake>> handshake_promise,
+  GenAuthKeyActor(Slice name, unique_ptr<mtproto::AuthKeyHandshake> handshake,
+                  unique_ptr<mtproto::AuthKeyHandshakeContext> context,
+                  Promise<unique_ptr<mtproto::RawConnection>> connection_promise,
+                  Promise<unique_ptr<mtproto::AuthKeyHandshake>> handshake_promise,
                   std::shared_ptr<Session::Callback> callback)
-      : handshake_(std::move(handshake))
+      : name_(name.str())
+      , handshake_(std::move(handshake))
       , context_(std::move(context))
       , connection_promise_(std::move(connection_promise))
       , handshake_promise_(std::move(handshake_promise))
@@ -60,11 +64,12 @@ class GenAuthKeyActor : public Actor {
   }
 
  private:
+  string name_;
   uint32 network_generation_ = 0;
-  std::unique_ptr<mtproto::AuthKeyHandshake> handshake_;
-  std::unique_ptr<mtproto::AuthKeyHandshakeContext> context_;
-  Promise<std::unique_ptr<mtproto::RawConnection>> connection_promise_;
-  Promise<std::unique_ptr<mtproto::AuthKeyHandshake>> handshake_promise_;
+  unique_ptr<mtproto::AuthKeyHandshake> handshake_;
+  unique_ptr<mtproto::AuthKeyHandshakeContext> context_;
+  Promise<unique_ptr<mtproto::RawConnection>> connection_promise_;
+  Promise<unique_ptr<mtproto::AuthKeyHandshake>> handshake_promise_;
   std::shared_ptr<Session::Callback> callback_;
   CancellationToken cancellation_token_{true};
 
@@ -75,8 +80,7 @@ class GenAuthKeyActor : public Actor {
     // std::tuple<Result<int>> b(std::forward_as_tuple(Result<int>()));
 
     callback_->request_raw_connection(PromiseCreator::cancellable_lambda(
-        cancellation_token_,
-        [actor_id = actor_id(this)](Result<std::unique_ptr<mtproto::RawConnection>> r_raw_connection) {
+        cancellation_token_, [actor_id = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> r_raw_connection) {
           send_closure(actor_id, &GenAuthKeyActor::on_connection, std::move(r_raw_connection), false);
         }));
   }
@@ -91,7 +95,7 @@ class GenAuthKeyActor : public Actor {
     stop();
   }
 
-  void on_connection(Result<std::unique_ptr<mtproto::RawConnection>> r_raw_connection, bool dummy) {
+  void on_connection(Result<unique_ptr<mtproto::RawConnection>> r_raw_connection, bool dummy) {
     if (r_raw_connection.is_error()) {
       connection_promise_.set_error(r_raw_connection.move_as_error());
       handshake_promise_.set_value(std::move(handshake_));
@@ -102,18 +106,24 @@ class GenAuthKeyActor : public Actor {
     VLOG(dc) << "Receive raw connection " << raw_connection.get();
     network_generation_ = raw_connection->extra_;
     child_ = create_actor_on_scheduler<mtproto::HandshakeActor>(
-        "HandshakeActor", G()->get_slow_net_scheduler_id(), std::move(handshake_), std::move(raw_connection),
-        std::move(context_), 10, std::move(connection_promise_), std::move(handshake_promise_));
+        PSLICE() << name_ + "::HandshakeActor", G()->get_slow_net_scheduler_id(), std::move(handshake_),
+        std::move(raw_connection), std::move(context_), 10, std::move(connection_promise_),
+        std::move(handshake_promise_));
   }
 };
 
 }  // namespace detail
 
 Session::Session(unique_ptr<Callback> callback, std::shared_ptr<AuthDataShared> shared_auth_data, int32 dc_id,
-                 bool is_main, bool use_pfs, bool is_cdn, const mtproto::AuthKey &tmp_auth_key,
+                 bool is_main, bool use_pfs, bool is_cdn, bool need_destroy, const mtproto::AuthKey &tmp_auth_key,
                  std::vector<mtproto::ServerSalt> server_salts)
     : dc_id_(dc_id), is_main_(is_main), is_cdn_(is_cdn) {
   VLOG(dc) << "Start connection";
+  need_destroy_ = need_destroy;
+  if (need_destroy) {
+    use_pfs = false;
+    CHECK(!is_cdn);
+  }
 
   shared_auth_data_ = std::move(shared_auth_data);
   auth_data_.set_use_pfs(use_pfs);
@@ -125,8 +135,10 @@ Session::Session(unique_ptr<Callback> callback, std::shared_ptr<AuthDataShared> 
     auth_data_.set_future_salts(std::move(server_salts), Time::now());
   }
   uint64 session_id = 0;
-  Random::secure_bytes(reinterpret_cast<uint8 *>(&session_id), sizeof(session_id));
-  auth_data_.session_id_ = session_id;
+  do {
+    Random::secure_bytes(reinterpret_cast<uint8 *>(&session_id), sizeof(session_id));
+  } while (session_id == 0);
+  auth_data_.set_session_id(session_id);
   LOG(WARNING) << "Generate new session_id " << session_id << " for " << (use_pfs ? "temp " : "")
                << (is_cdn ? "CDN " : "") << "auth key " << auth_data_.get_auth_key().id() << " for DC" << dc_id;
 
@@ -141,6 +153,10 @@ Session::Session(unique_ptr<Callback> callback, std::shared_ptr<AuthDataShared> 
     auth_data_.set_header(G()->mtproto_header().get_default_header().str());
   }
   last_activity_timestamp_ = Time::now();
+}
+
+bool Session::can_destroy_auth_key() const {
+  return need_destroy_;
 }
 
 void Session::start_up() {
@@ -198,20 +214,11 @@ void Session::connection_online_update(bool force) {
   }
   connection_online_flag_ = new_connection_online_flag;
   VLOG(dc) << "Set connection_online " << connection_online_flag_;
-  if (is_main_) {
-    if (main_connection_.connection) {
-      main_connection_.connection->set_online(connection_online_flag_);
-    }
-    if (long_poll_connection_.connection) {
-      long_poll_connection_.connection->set_online(connection_online_flag_);
-    }
-  } else {
-    // TODO: support online state in media connections.
-    if (connection_online_flag_) {
-      connection_close(&main_connection_);
-      connection_close(&long_poll_connection_);
-    }
-    return;
+  if (main_connection_.connection) {
+    main_connection_.connection->set_online(connection_online_flag_, is_main_);
+  }
+  if (long_poll_connection_.connection) {
+    long_poll_connection_.connection->set_online(connection_online_flag_, is_main_);
   }
 }
 
@@ -219,8 +226,8 @@ void Session::send(NetQueryPtr &&query) {
   last_activity_timestamp_ = Time::now();
 
   query->debug("Session: received from SessionProxy");
-  query->set_session_id(auth_data_.session_id_);
-  VLOG(net_query) << "got query " << query;
+  query->set_session_id(auth_data_.get_session_id());
+  VLOG(net_query) << "Got query " << query;
   if (query->update_is_ready()) {
     return_query(std::move(query));
     return;
@@ -268,7 +275,7 @@ void Session::return_query(NetQueryPtr &&query) {
   last_activity_timestamp_ = Time::now();
 
   query->set_session_id(0);
-  G()->net_query_dispatcher().dispatch(std::move(query));
+  callback_->on_result(std::move(query));
 }
 
 void Session::flush_pending_invoke_after_queries() {
@@ -280,6 +287,7 @@ void Session::flush_pending_invoke_after_queries() {
 }
 
 void Session::close() {
+  LOG(INFO) << "Close session (external)";
   close_flag_ = true;
   connection_close(&main_connection_);
   connection_close(&long_poll_connection_);
@@ -392,7 +400,7 @@ void Session::on_server_time_difference_updated() {
 }
 
 void Session::on_before_close() {
-  unsubscribe_before_close(current_info_->connection->get_pollable());
+  Scheduler::unsubscribe_before_close(current_info_->connection->get_poll_info().get_pollable_fd_ref());
 }
 
 void Session::on_closed(Status status) {
@@ -401,9 +409,9 @@ void Session::on_closed(Status status) {
   }
 
   if (status.is_error()) {
-    LOG(WARNING) << "on_closed: " << status << " " << current_info_->connection->get_name();
+    LOG(WARNING) << "Session closed: " << status << " " << current_info_->connection->get_name();
   } else {
-    LOG(INFO) << "on_closed: " << status << " " << current_info_->connection->get_name();
+    LOG(INFO) << "Session closed: " << status << " " << current_info_->connection->get_name();
   }
 
   if (status.is_error() && status.code() == -404) {
@@ -417,6 +425,9 @@ void Session::on_closed(Status status) {
       auth_data_.drop_main_auth_key();
       on_auth_key_updated();
       on_session_failed(std::move(status));
+    } else if (need_destroy_) {
+      auth_data_.drop_main_auth_key();
+      on_auth_key_updated();
     }
   }
 
@@ -432,7 +443,7 @@ void Session::on_closed(Status status) {
         mark_as_known(it->first, &it->second);
 
         auto &query = it->second.query;
-        VLOG(net_query) << "resend query (on_disconnected, no ack) " << query;
+        VLOG(net_query) << "Resend query (on_disconnected, no ack) " << query;
         query->set_message_id(0);
         query->cancel_slot_.clear_event();
         query->set_error(Status::Error(500, PSLICE() << "Session failed: " << status.message()),
@@ -455,7 +466,8 @@ void Session::on_closed(Status status) {
 void Session::on_session_created(uint64 unique_id, uint64 first_id) {
   // TODO: use unique_id
   // send updatesTooLong to force getDifference
-  LOG(INFO) << "new_session_created " << unique_id << " " << first_id;
+  LOG(INFO) << "New session " << unique_id << " created "
+            << " with first message_id " << first_id;
   if (is_main_) {
     LOG(DEBUG) << "Sending updatesTooLong to force getDifference";
     telegram_api::updatesTooLong too_long_;
@@ -474,7 +486,7 @@ void Session::on_session_created(uint64 unique_id, uint64 first_id) {
       mark_as_known(it->first, &it->second);
 
       auto &query = it->second.query;
-      VLOG(net_query) << "resend query (on_session_created) " << query;
+      VLOG(net_query) << "Resend query (on_session_created) " << query;
       query->set_message_id(0);
       query->cancel_slot_.clear_event();
       resend_query(std::move(query));
@@ -650,7 +662,7 @@ void Session::on_message_result_error(uint64 id, int error_code, BufferSlice mes
   // TODO: some errors shouldn't cause loss of authorizations. Especially when PFS will be used
   if (error_code == 401 && message.as_slice() != CSlice("SESSION_PASSWORD_NEEDED")) {
     if (auth_data_.use_pfs() && message.as_slice() == CSlice("AUTH_KEY_PERM_EMPTY")) {
-      LOG(ERROR) << "Receive AUTH_KEY_PERM_EMPTY in session " << auth_data_.session_id_ << " for auth key "
+      LOG(ERROR) << "Receive AUTH_KEY_PERM_EMPTY in session " << auth_data_.get_session_id() << " for auth key "
                  << auth_data_.get_tmp_auth_key().id();
       auth_data_.drop_tmp_auth_key();
       on_tmp_auth_key_updated();
@@ -659,7 +671,7 @@ void Session::on_message_result_error(uint64 id, int error_code, BufferSlice mes
       LOG(WARNING) << "Lost authorization due to " << tag("msg", message.as_slice());
       auth_data_.set_auth_flag(false);
       shared_auth_data_->set_auth_key(auth_data_.get_main_auth_key());
-      auth_lost_flag_ = true;
+      on_session_failed(Status::OK());
     }
   }
 
@@ -676,7 +688,7 @@ void Session::on_message_result_error(uint64 id, int error_code, BufferSlice mes
   }
 
   Query *query_ptr = &it->second;
-  VLOG(net_query) << "return query error " << query_ptr->query;
+  VLOG(net_query) << "Return query error " << query_ptr->query;
 
   cleanup_container(id, query_ptr);
   mark_as_known(id, query_ptr);
@@ -690,7 +702,7 @@ void Session::on_message_result_error(uint64 id, int error_code, BufferSlice mes
 }
 
 void Session::on_message_failed_inner(uint64 id, bool in_container) {
-  LOG(INFO) << "message inner failed " << id;
+  LOG(INFO) << "Message inner failed " << id;
   auto it = sent_queries_.find(id);
   if (it == sent_queries_.end()) {
     return;
@@ -710,7 +722,7 @@ void Session::on_message_failed_inner(uint64 id, bool in_container) {
 }
 
 void Session::on_message_failed(uint64 id, Status status) {
-  LOG(INFO) << "on_message_failed " << tag("id", id) << tag("status", status);
+  LOG(INFO) << "Message failed: " << tag("id", id) << tag("status", status);
   status.ignore();
 
   auto cit = sent_containers_.find(id);
@@ -776,6 +788,11 @@ void Session::on_message_info(uint64 id, int32 state, uint64 answer_id, int32 an
     current_info_->connection->resend_answer(answer_id);
   }
 }
+Status Session::on_destroy_auth_key() {
+  auth_data_.drop_main_auth_key();
+  on_auth_key_updated();
+  return Status::Error("Close because of on_destroy_auth_key");
+}
 
 bool Session::has_queries() const {
   return !pending_invoke_after_queries_.empty() || !pending_queries_.empty() || !sent_queries_.empty();
@@ -798,7 +815,7 @@ void Session::add_query(NetQueryPtr &&net_query) {
 }
 
 void Session::connection_send_query(ConnectionInfo *info, NetQueryPtr &&net_query, uint64 message_id) {
-  net_query->debug("Session: try send to mtproto::connection");
+  net_query->debug("Session: trying to send to mtproto::connection");
   CHECK(info->state == ConnectionInfo::State::Ready);
   current_info_ = info;
 
@@ -810,7 +827,7 @@ void Session::connection_send_query(ConnectionInfo *info, NetQueryPtr &&net_quer
   NetQueryRef invoke_after = net_query->invoke_after();
   if (!invoke_after.empty()) {
     invoke_after_id = invoke_after->message_id();
-    if (invoke_after->session_id() != auth_data_.session_id_ || invoke_after_id == 0) {
+    if (invoke_after->session_id() != auth_data_.get_session_id() || invoke_after_id == 0) {
       net_query->set_error_resend_invoke_after();
       return return_query(std::move(net_query));
     }
@@ -831,15 +848,15 @@ void Session::connection_send_query(ConnectionInfo *info, NetQueryPtr &&net_quer
     LOG(FATAL) << "Failed to send query: " << r_message_id.error();
   }
   message_id = r_message_id.ok();
-  VLOG(net_query) << "send query to connection " << net_query << " [msg_id:" << format::as_hex(message_id) << "]"
+  VLOG(net_query) << "Send query to connection " << net_query << " [msg_id:" << format::as_hex(message_id) << "]"
                   << tag("invoke_after", format::as_hex(invoke_after_id));
   net_query->set_message_id(message_id);
   net_query->cancel_slot_.clear_event();
-  CHECK(sent_queries_.find(message_id) == sent_queries_.end()) << message_id;
+  LOG_CHECK(sent_queries_.find(message_id) == sent_queries_.end()) << message_id;
   net_query->debug_unknown = false;
   net_query->debug_ack = 0;
   if (!net_query->cancel_slot_.empty()) {
-    LOG(DEBUG) << "set event for net_query cancellation " << tag("message_id", format::as_hex(message_id));
+    LOG(DEBUG) << "Set event for net_query cancellation " << tag("message_id", format::as_hex(message_id));
     net_query->cancel_slot_.set_event(EventCreator::raw(actor_id(), message_id));
   }
   auto status = sent_queries_.emplace(
@@ -865,7 +882,7 @@ void Session::connection_open(ConnectionInfo *info, bool ask_info) {
   // NB: rely on constant location of info
   auto promise = PromiseCreator::cancellable_lambda(
       info->cancellation_token_,
-      [actor_id = actor_id(this), info = info](Result<std::unique_ptr<mtproto::RawConnection>> res) {
+      [actor_id = actor_id(this), info = info](Result<unique_ptr<mtproto::RawConnection>> res) {
         send_closure(actor_id, &Session::connection_open_finish, info, std::move(res));
       });
 
@@ -880,7 +897,7 @@ void Session::connection_open(ConnectionInfo *info, bool ask_info) {
   info->wakeup_at = Time::now_cached() + 1000;
 }
 
-void Session::connection_add(std::unique_ptr<mtproto::RawConnection> raw_connection) {
+void Session::connection_add(unique_ptr<mtproto::RawConnection> raw_connection) {
   VLOG(dc) << "Cache connection " << raw_connection.get();
   cached_connection_ = std::move(raw_connection);
   cached_connection_timestamp_ = Time::now();
@@ -897,7 +914,7 @@ void Session::connection_check_mode(ConnectionInfo *info) {
 }
 
 void Session::connection_open_finish(ConnectionInfo *info,
-                                     Result<std::unique_ptr<mtproto::RawConnection>> r_raw_connection) {
+                                     Result<unique_ptr<mtproto::RawConnection>> r_raw_connection) {
   if (close_flag_ || info->state != ConnectionInfo::State::Connecting) {
     VLOG(dc) << "Ignore raw connection while closing";
     return;
@@ -938,25 +955,22 @@ void Session::connection_open_finish(ConnectionInfo *info,
   Slice mode_name;
   if (mode_ == Mode::Tcp) {
     mode = mtproto::SessionConnection::Mode::Tcp;
-    mode_name = "Tcp";
+    mode_name = Slice("Tcp");
   } else {
     if (info->connection_id == 0) {
       mode = mtproto::SessionConnection::Mode::Http;
-      mode_name = "Http";
+      mode_name = Slice("Http");
     } else {
       mode = mtproto::SessionConnection::Mode::HttpLongPoll;
-      mode_name = "HttpLongPoll";
+      mode_name = Slice("HttpLongPoll");
     }
   }
   auto name = PSTRING() << get_name() << "::Connect::" << mode_name << "::" << raw_connection->debug_str_;
-  info->connection =
-      make_unique<mtproto::SessionConnection>(mode, std::move(raw_connection), &auth_data_, DhCache::instance());
-  if (is_main_) {
-    info->connection->set_online(connection_online_flag_);
-  }
+  LOG(INFO) << "Finished to open connection " << name;
+  info->connection = make_unique<mtproto::SessionConnection>(mode, std::move(raw_connection), &auth_data_);
+  info->connection->set_online(connection_online_flag_, is_main_);
   info->connection->set_name(name);
-  info->connection->get_pollable().set_observer(this);
-  subscribe(info->connection->get_pollable());
+  Scheduler::subscribe(info->connection->get_poll_info().extract_pollable_fd(this));
   info->mode = mode_;
   info->state = ConnectionInfo::State::Ready;
   info->created_at = Time::now_cached();
@@ -992,11 +1006,12 @@ void Session::connection_close(ConnectionInfo *info) {
   CHECK(info->state == ConnectionInfo::State::Empty);
 }
 
-bool Session::need_send_bind_key() {
+bool Session::need_send_bind_key() const {
   return auth_data_.use_pfs() && !auth_data_.get_bind_flag() && auth_data_.get_tmp_auth_key().id() != tmp_auth_key_id_;
 }
-bool Session::need_send_query() {
-  return !close_flag_ && (!auth_data_.use_pfs() || auth_data_.get_bind_flag()) && !pending_queries_.empty();
+bool Session::need_send_query() const {
+  return !close_flag_ && (!auth_data_.use_pfs() || auth_data_.get_bind_flag()) && !pending_queries_.empty() &&
+         !can_destroy_auth_key();
 }
 bool Session::connection_send_bind_key(ConnectionInfo *info) {
   CHECK(info->state != ConnectionInfo::State::Empty);
@@ -1009,15 +1024,15 @@ bool Session::connection_send_bind_key(ConnectionInfo *info) {
 
   int64 perm_auth_key_id = auth_data_.get_main_auth_key().id();
   int64 nonce = Random::secure_int64();
-  int32 expire_at = static_cast<int32>(auth_data_.get_server_time(auth_data_.get_tmp_auth_key().expire_at()));
+  int32 expires_at = static_cast<int32>(auth_data_.get_server_time(auth_data_.get_tmp_auth_key().expires_at()));
   int64 message_id;
   BufferSlice encrypted;
-  std::tie(message_id, encrypted) = info->connection->encrypted_bind(perm_auth_key_id, nonce, expire_at);
+  std::tie(message_id, encrypted) = info->connection->encrypted_bind(perm_auth_key_id, nonce, expires_at);
 
   LOG(INFO) << "Bind key: " << tag("tmp", key_id) << tag("perm", static_cast<uint64>(perm_auth_key_id));
   NetQueryPtr query = G()->net_query_creator().create(
       last_bind_id_,
-      create_storer(telegram_api::auth_bindTempAuthKey(perm_auth_key_id, nonce, expire_at, std::move(encrypted))));
+      create_storer(telegram_api::auth_bindTempAuthKey(perm_auth_key_id, nonce, expires_at, std::move(encrypted))));
   query->dispatch_ttl = 0;
   query->set_callback(actor_shared(this));
   connection_send_query(info, std::move(query), message_id);
@@ -1025,7 +1040,7 @@ bool Session::connection_send_bind_key(ConnectionInfo *info) {
   return true;
 }
 
-void Session::on_handshake_ready(Result<std::unique_ptr<mtproto::AuthKeyHandshake>> r_handshake) {
+void Session::on_handshake_ready(Result<unique_ptr<mtproto::AuthKeyHandshake>> r_handshake) {
   auto handshake_id = narrow_cast<HandshakeId>(get_link_token() - 1);
   bool is_main = handshake_id == MainAuthKeyHandshake;
   auto &info = handshake_info_[handshake_id];
@@ -1050,7 +1065,7 @@ void Session::on_handshake_ready(Result<std::unique_ptr<mtproto::AuthKeyHandshak
         auth_data_.set_tmp_auth_key(std::move(handshake->auth_key));
         on_tmp_auth_key_updated();
       }
-      LOG(WARNING) << "Update auth key in session_id " << auth_data_.session_id_ << " to "
+      LOG(WARNING) << "Update auth key in session_id " << auth_data_.get_session_id() << " to "
                    << auth_data_.get_auth_key().id();
       connection_close(&main_connection_);
       connection_close(&long_poll_connection_);
@@ -1079,7 +1094,7 @@ void Session::create_gen_auth_key_actor(HandshakeId handshake_id) {
   info.flag_ = true;
   bool is_main = handshake_id == MainAuthKeyHandshake;
   if (!info.handshake_) {
-    info.handshake_ = std::make_unique<mtproto::AuthKeyHandshake>(dc_id_, is_main && !is_cdn_ ? 0 : 24 * 60 * 60);
+    info.handshake_ = make_unique<mtproto::AuthKeyHandshake>(dc_id_, is_main && !is_cdn_ ? 0 : 24 * 60 * 60);
   }
   class AuthKeyHandshakeContext : public mtproto::AuthKeyHandshakeContext {
    public:
@@ -1098,9 +1113,9 @@ void Session::create_gen_auth_key_actor(HandshakeId handshake_id) {
     std::shared_ptr<PublicRsaKeyInterface> public_rsa_key_;
   };
   info.actor_ = create_actor<detail::GenAuthKeyActor>(
-      "GenAuthKey", std::move(info.handshake_),
-      std::make_unique<AuthKeyHandshakeContext>(DhCache::instance(), shared_auth_data_->public_rsa_key()),
-      PromiseCreator::lambda([self = actor_id(this)](Result<std::unique_ptr<mtproto::RawConnection>> r_connection) {
+      PSLICE() << get_name() << "::GenAuthKey", get_name(), std::move(info.handshake_),
+      td::make_unique<AuthKeyHandshakeContext>(DhCache::instance(), shared_auth_data_->public_rsa_key()),
+      PromiseCreator::lambda([self = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> r_connection) {
         if (r_connection.is_error()) {
           if (r_connection.error().code() != 1) {
             LOG(WARNING) << "Failed to open connection: " << r_connection.error();
@@ -1111,7 +1126,7 @@ void Session::create_gen_auth_key_actor(HandshakeId handshake_id) {
       }),
       PromiseCreator::lambda(
           [self = actor_shared(this, handshake_id + 1), handshake_perf = PerfWarningTimer("handshake", 1000.1)](
-              Result<std::unique_ptr<mtproto::AuthKeyHandshake>> handshake) mutable {
+              Result<unique_ptr<mtproto::AuthKeyHandshake>> handshake) mutable {
             // later is just to avoid lost hangup
             send_closure_later(std::move(self), &Session::on_handshake_ready, std::move(handshake));
           }),
@@ -1119,6 +1134,9 @@ void Session::create_gen_auth_key_actor(HandshakeId handshake_id) {
 }
 
 void Session::auth_loop() {
+  if (can_destroy_auth_key()) {
+    return;
+  }
   if (auth_data_.need_main_auth_key()) {
     create_gen_auth_key_actor(MainAuthKeyHandshake);
   }
@@ -1136,7 +1154,8 @@ void Session::loop() {
   if (cached_connection_timestamp_ < Time::now_cached() - 10) {
     cached_connection_.reset();
   }
-  if (!is_main_ && !has_queries() && last_activity_timestamp_ < Time::now_cached() - ACTIVITY_TIMEOUT) {
+  if (!is_main_ && !has_queries() && !need_destroy_ &&
+      last_activity_timestamp_ < Time::now_cached() - ACTIVITY_TIMEOUT) {
     on_session_failed(Status::OK());
   }
 
@@ -1147,7 +1166,6 @@ void Session::loop() {
   main_connection_.wakeup_at = 0;
   long_poll_connection_.wakeup_at = 0;
 
-  auth_lost_flag_ = false;
   // NB: order is crucial. First long_poll_connection, then main_connection
   // Otherwise queries could be sent with big delay
 
@@ -1183,6 +1201,11 @@ void Session::loop() {
           need_flush = true;
         }
       }
+      if (can_destroy_auth_key()) {
+        if (main_connection_.connection) {
+          main_connection_.connection->destroy_key();
+        }
+      }
       if (need_flush) {
         connection_flush(&main_connection_);
         need_flush = false;
@@ -1193,13 +1216,6 @@ void Session::loop() {
   }
   if (!close_flag_ && main_connection_.state == ConnectionInfo::State::Empty) {
     connection_open(&main_connection_, true /*send ask_info*/);
-  }
-
-  if (auth_lost_flag_) {
-    connection_close(&main_connection_);
-    connection_close(&long_poll_connection_);
-    auth_lost_flag_ = false;
-    relax_timeout_at(&wakeup_at, Time::now_cached() + 0.1);
   }
 
   relax_timeout_at(&wakeup_at, main_connection_.wakeup_at);

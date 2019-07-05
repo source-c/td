@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -11,13 +11,13 @@
 #include "td/telegram/files/FileId.hpp"
 #include "td/telegram/Photo.hpp"
 
-#include "td/utils/logging.h"
+#include "td/utils/common.h"
 #include "td/utils/tl_helpers.h"
 
 namespace td {
 
-template <class T>
-void AudiosManager::store_audio(FileId file_id, T &storer) const {
+template <class StorerT>
+void AudiosManager::store_audio(FileId file_id, StorerT &storer) const {
   auto it = audios_.find(file_id);
   CHECK(it != audios_.end());
   const Audio *audio = it->second.get();
@@ -30,8 +30,8 @@ void AudiosManager::store_audio(FileId file_id, T &storer) const {
   store(file_id, storer);
 }
 
-template <class T>
-FileId AudiosManager::parse_audio(T &parser) {
+template <class ParserT>
+FileId AudiosManager::parse_audio(ParserT &parser) {
   auto audio = make_unique<Audio>();
   parse(audio->file_name, parser);
   parse(audio->mime_type, parser);
@@ -40,7 +40,7 @@ FileId AudiosManager::parse_audio(T &parser) {
   parse(audio->performer, parser);
   parse(audio->thumbnail, parser);
   parse(audio->file_id, parser);
-  return on_get_audio(std::move(audio), true);
+  return on_get_audio(std::move(audio), false);
 }
 
 }  // namespace td

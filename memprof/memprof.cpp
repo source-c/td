@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -72,7 +72,8 @@ static int fast_backtrace(void **buffer, int size) {
   return i;
 }
 
-static std::atomic<std::size_t> fast_backtrace_failed_cnt, backtrace_total_cnt;
+static std::atomic<std::size_t> fast_backtrace_failed_cnt;
+static std::atomic<std::size_t> backtrace_total_cnt;
 double get_fast_backtrace_success_rate() {
   return 1 - static_cast<double>(fast_backtrace_failed_cnt.load(std::memory_order_relaxed)) /
                  static_cast<double>(std::max(std::size_t(1), backtrace_total_cnt.load(std::memory_order_relaxed)));
@@ -280,7 +281,7 @@ void *memalign(std::size_t aligment, std::size_t size) {
 }
 }
 
-// c++14 guarantees than it is enough to override this two operators.
+// c++14 guarantees that it is enough to override these two operators.
 void *operator new(std::size_t count) {
   return malloc_with_frame(count, get_backtrace());
 }

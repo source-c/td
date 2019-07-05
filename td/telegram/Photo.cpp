@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -9,8 +9,9 @@
 #include "td/telegram/secret_api.h"
 #include "td/telegram/telegram_api.h"
 
+#include "td/telegram/files/FileEncryptionKey.h"
+#include "td/telegram/files/FileLocation.h"
 #include "td/telegram/files/FileManager.h"
-#include "td/telegram/Global.h"
 #include "td/telegram/net/DcId.h"
 
 #include "td/utils/common.h"
@@ -61,14 +62,15 @@ StringBuilder &operator<<(StringBuilder &string_builder, const Dimensions &dimen
 }
 
 static FileId register_photo(FileManager *file_manager, FileType file_type, int64 id, int64 access_hash,
+                             std::string upload_file_reference,
                              tl_object_ptr<telegram_api::FileLocation> &&location_ptr, DialogId owner_dialog_id,
                              int32 file_size, bool is_webp = false) {
-  int32 location_id = location_ptr->get_id();
   DcId dc_id;
   int32 local_id;
   int64 volume_id;
   int64 secret;
-  switch (location_id) {
+  std::string download_file_reference;
+  switch (location_ptr->get_id()) {
     case telegram_api::fileLocationUnavailable::ID: {
       auto location = move_tl_object_as<telegram_api::fileLocationUnavailable>(location_ptr);
       dc_id = DcId::invalid();
@@ -87,6 +89,7 @@ static FileId register_photo(FileManager *file_manager, FileType file_type, int6
       local_id = location->local_id_;
       volume_id = location->volume_id_;
       secret = location->secret_;
+      download_file_reference = location->file_reference_.as_slice().str();
       break;
     }
     default:
@@ -99,9 +102,10 @@ static FileId register_photo(FileManager *file_manager, FileType file_type, int6
              << ")";
   auto suggested_name = PSTRING() << static_cast<uint64>(volume_id) << "_" << static_cast<uint64>(local_id)
                                   << (is_webp ? ".webp" : ".jpg");
-  return file_manager->register_remote(
-      FullRemoteFileLocation(file_type, id, access_hash, local_id, volume_id, secret, dc_id),
-      FileLocationSource::FromServer, owner_dialog_id, file_size, 0, std::move(suggested_name));
+  return file_manager->register_remote(FullRemoteFileLocation(file_type, id, access_hash, local_id, volume_id, secret,
+                                                              dc_id, upload_file_reference, download_file_reference),
+                                       FileLocationSource::FromServer, owner_dialog_id, file_size, 0,
+                                       std::move(suggested_name));
 }
 
 ProfilePhoto get_profile_photo(FileManager *file_manager,
@@ -116,9 +120,9 @@ ProfilePhoto get_profile_photo(FileManager *file_manager,
       auto profile_photo = move_tl_object_as<telegram_api::userProfilePhoto>(profile_photo_ptr);
 
       result.id = profile_photo->photo_id_;
-      result.small_file_id = register_photo(file_manager, FileType::ProfilePhoto, result.id, 0,
+      result.small_file_id = register_photo(file_manager, FileType::ProfilePhoto, result.id, 0, "",
                                             std::move(profile_photo->photo_small_), DialogId(), 0);
-      result.big_file_id = register_photo(file_manager, FileType::ProfilePhoto, result.id, 0,
+      result.big_file_id = register_photo(file_manager, FileType::ProfilePhoto, result.id, 0, "",
                                           std::move(profile_photo->photo_big_), DialogId(), 0);
       break;
     }
@@ -135,9 +139,9 @@ tl_object_ptr<td_api::profilePhoto> get_profile_photo_object(FileManager *file_m
   if (profile_photo == nullptr || !profile_photo->small_file_id.is_valid()) {
     return nullptr;
   }
-  return make_tl_object<td_api::profilePhoto>(profile_photo->id,
-                                              file_manager->get_file_object(profile_photo->small_file_id),
-                                              file_manager->get_file_object(profile_photo->big_file_id));
+  return td_api::make_object<td_api::profilePhoto>(profile_photo->id,
+                                                   file_manager->get_file_object(profile_photo->small_file_id),
+                                                   file_manager->get_file_object(profile_photo->big_file_id));
 }
 
 bool operator==(const ProfilePhoto &lhs, const ProfilePhoto &rhs) {
@@ -151,7 +155,7 @@ bool operator==(const ProfilePhoto &lhs, const ProfilePhoto &rhs) {
   }
 
   if (location_differs) {
-    LOG_IF(ERROR, !id_differs) << "location_differs = true, but id_differs = false. First profilePhoto: " << lhs
+    LOG_IF(ERROR, !id_differs) << "Photo " << lhs.id << " location has changed. First profilePhoto: " << lhs
                                << ", second profilePhoto: " << rhs;
     return false;
   }
@@ -177,10 +181,10 @@ DialogPhoto get_dialog_photo(FileManager *file_manager, tl_object_ptr<telegram_a
     case telegram_api::chatPhoto::ID: {
       auto chat_photo = move_tl_object_as<telegram_api::chatPhoto>(chat_photo_ptr);
 
-      result.small_file_id = register_photo(file_manager, FileType::ProfilePhoto, 0, 0,
+      result.small_file_id = register_photo(file_manager, FileType::ProfilePhoto, 0, 0, "",
                                             std::move(chat_photo->photo_small_), DialogId(), 0);
-      result.big_file_id =
-          register_photo(file_manager, FileType::ProfilePhoto, 0, 0, std::move(chat_photo->photo_big_), DialogId(), 0);
+      result.big_file_id = register_photo(file_manager, FileType::ProfilePhoto, 0, 0, "",
+                                          std::move(chat_photo->photo_big_), DialogId(), 0);
 
       break;
     }
@@ -196,8 +200,19 @@ tl_object_ptr<td_api::chatPhoto> get_chat_photo_object(FileManager *file_manager
   if (dialog_photo == nullptr || !dialog_photo->small_file_id.is_valid()) {
     return nullptr;
   }
-  return make_tl_object<td_api::chatPhoto>(file_manager->get_file_object(dialog_photo->small_file_id),
-                                           file_manager->get_file_object(dialog_photo->big_file_id));
+  return td_api::make_object<td_api::chatPhoto>(file_manager->get_file_object(dialog_photo->small_file_id),
+                                                file_manager->get_file_object(dialog_photo->big_file_id));
+}
+
+vector<FileId> dialog_photo_get_file_ids(const DialogPhoto &dialog_photo) {
+  vector<FileId> result;
+  if (dialog_photo.small_file_id.is_valid()) {
+    result.push_back(dialog_photo.small_file_id);
+  }
+  if (dialog_photo.big_file_id.is_valid()) {
+    result.push_back(dialog_photo.big_file_id);
+  }
+  return result;
 }
 
 bool operator==(const DialogPhoto &lhs, const DialogPhoto &rhs) {
@@ -229,7 +244,7 @@ PhotoSize get_thumbnail_photo_size(FileManager *file_manager, BufferSlice bytes,
   auto volume_id = Random::secure_int64();
   auto secret = 0;
   res.file_id = file_manager->register_remote(
-      FullRemoteFileLocation(FileType::EncryptedThumbnail, 0, 0, local_id, volume_id, secret, dc_id),
+      FullRemoteFileLocation(FileType::EncryptedThumbnail, 0, 0, local_id, volume_id, secret, dc_id, "", ""),
       FileLocationSource::FromServer, owner_dialog_id, res.size, 0,
       PSTRING() << static_cast<uint64>(volume_id) << "_" << static_cast<uint64>(local_id) << ".jpg");
   file_manager->set_content(res.file_id, std::move(bytes));
@@ -238,15 +253,15 @@ PhotoSize get_thumbnail_photo_size(FileManager *file_manager, BufferSlice bytes,
 }
 
 PhotoSize get_photo_size(FileManager *file_manager, FileType file_type, int64 id, int64 access_hash,
-                         DialogId owner_dialog_id, tl_object_ptr<telegram_api::PhotoSize> &&size_ptr, bool is_webp) {
+                         std::string upload_file_reference, DialogId owner_dialog_id,
+                         tl_object_ptr<telegram_api::PhotoSize> &&size_ptr, bool is_webp) {
   tl_object_ptr<telegram_api::FileLocation> location_ptr;
   string type;
 
   PhotoSize res;
   BufferSlice content;
 
-  int32 size_id = size_ptr->get_id();
-  switch (size_id) {
+  switch (size_ptr->get_id()) {
     case telegram_api::photoSizeEmpty::ID:
       return res;
     case telegram_api::photoSize::ID: {
@@ -272,14 +287,13 @@ PhotoSize get_photo_size(FileManager *file_manager, FileType file_type, int64 id
 
       break;
     }
-
     default:
       UNREACHABLE();
       break;
   }
 
-  res.file_id = register_photo(file_manager, file_type, id, access_hash, std::move(location_ptr), owner_dialog_id,
-                               res.size, is_webp);
+  res.file_id = register_photo(file_manager, file_type, id, access_hash, upload_file_reference, std::move(location_ptr),
+                               owner_dialog_id, res.size, is_webp);
 
   if (!content.empty()) {
     file_manager->set_content(res.file_id, std::move(content));
@@ -379,13 +393,17 @@ tl_object_ptr<td_api::photoSize> get_photo_size_object(FileManager *file_manager
     return nullptr;
   }
 
-  return make_tl_object<td_api::photoSize>(
+  return td_api::make_object<td_api::photoSize>(
       photo_size->type ? std::string(1, static_cast<char>(photo_size->type))
                        : std::string(),  // TODO replace string type with integer type
       file_manager->get_file_object(photo_size->file_id), photo_size->dimensions.width, photo_size->dimensions.height);
 }
 
-void sort_photo_sizes(vector<td_api::object_ptr<td_api::photoSize>> &sizes) {
+vector<td_api::object_ptr<td_api::photoSize>> get_photo_sizes_object(FileManager *file_manager,
+                                                                     const vector<PhotoSize> &photo_sizes) {
+  auto sizes = transform(photo_sizes, [file_manager](const PhotoSize &photo_size) {
+    return get_photo_size_object(file_manager, &photo_size);
+  });
   std::sort(sizes.begin(), sizes.end(), [](const auto &lhs, const auto &rhs) {
     if (lhs->photo_->expected_size_ != rhs->photo_->expected_size_) {
       return lhs->photo_->expected_size_ < rhs->photo_->expected_size_;
@@ -393,6 +411,7 @@ void sort_photo_sizes(vector<td_api::object_ptr<td_api::photoSize>> &sizes) {
     return static_cast<uint32>(lhs->width_) * static_cast<uint32>(lhs->height_) <
            static_cast<uint32>(rhs->width_) * static_cast<uint32>(rhs->height_);
   });
+  return sizes;
 }
 
 bool operator==(const PhotoSize &lhs, const PhotoSize &rhs) {
@@ -430,9 +449,14 @@ StringBuilder &operator<<(StringBuilder &string_builder, const PhotoSize &photo_
 
 Photo get_photo(FileManager *file_manager, tl_object_ptr<telegram_api::encryptedFile> &&file,
                 tl_object_ptr<secret_api::decryptedMessageMediaPhoto> &&photo, DialogId owner_dialog_id) {
-  CHECK(DcId::is_valid(file->dc_id_));
+  DcId dc_id;
+  if (!DcId::is_valid(file->dc_id_)) {
+    dc_id = DcId::invalid();
+  } else {
+    dc_id = DcId::internal(file->dc_id_);
+  }
   FileId file_id = file_manager->register_remote(
-      FullRemoteFileLocation(FileType::Encrypted, file->id_, file->access_hash_, DcId::internal(file->dc_id_)),
+      FullRemoteFileLocation(FileType::Encrypted, file->id_, file->access_hash_, dc_id, ""),
       FileLocationSource::FromServer, owner_dialog_id, photo->size_, 0,
       PSTRING() << static_cast<uint64>(file->id_) << ".jpg");
   file_manager->set_encryption_key(file_id, FileEncryptionKey{photo->key_.as_slice(), photo->iv_.as_slice()});
@@ -463,11 +487,25 @@ Photo get_photo(FileManager *file_manager, tl_object_ptr<telegram_api::photo> &&
   res.has_stickers = (photo->flags_ & telegram_api::photo::HAS_STICKERS_MASK) != 0;
 
   for (auto &size_ptr : photo->sizes_) {
-    res.photos.push_back(get_photo_size(file_manager, FileType::Photo, photo->id_, photo->access_hash_, owner_dialog_id,
-                                        std::move(size_ptr), false));
+    res.photos.push_back(get_photo_size(file_manager, FileType::Photo, photo->id_, photo->access_hash_,
+                                        photo->file_reference_.as_slice().str(), owner_dialog_id, std::move(size_ptr),
+                                        false));
   }
 
   return res;
+}
+
+Photo get_web_document_photo(FileManager *file_manager, tl_object_ptr<telegram_api::WebDocument> web_document,
+                             DialogId owner_dialog_id) {
+  PhotoSize s = get_web_document_photo_size(file_manager, FileType::Photo, owner_dialog_id, std::move(web_document));
+  Photo photo;
+  if (!s.file_id.is_valid()) {
+    photo.id = -2;
+  } else {
+    photo.id = 0;
+    photo.photos.push_back(s);
+  }
+  return photo;
 }
 
 tl_object_ptr<td_api::photo> get_photo_object(FileManager *file_manager, const Photo *photo) {
@@ -475,18 +513,23 @@ tl_object_ptr<td_api::photo> get_photo_object(FileManager *file_manager, const P
     return nullptr;
   }
 
-  vector<td_api::object_ptr<td_api::photoSize>> photos;
-  for (auto &photo_size : photo->photos) {
-    photos.push_back(get_photo_size_object(file_manager, &photo_size));
+  return td_api::make_object<td_api::photo>(photo->has_stickers, get_photo_sizes_object(file_manager, photo->photos));
+}
+
+tl_object_ptr<td_api::userProfilePhoto> get_user_profile_photo_object(FileManager *file_manager, const Photo *photo) {
+  if (photo == nullptr || photo->id == -2) {
+    return nullptr;
   }
-  sort_photo_sizes(photos);
-  return make_tl_object<td_api::photo>(photo->id, photo->has_stickers, std::move(photos));
+
+  return td_api::make_object<td_api::userProfilePhoto>(photo->id, photo->date,
+                                                       get_photo_sizes_object(file_manager, photo->photos));
 }
 
 void photo_delete_thumbnail(Photo &photo) {
   for (size_t i = 0; i < photo.photos.size(); i++) {
     if (photo.photos[i].type == 't') {
       photo.photos.erase(photo.photos.begin() + i);
+      return;
     }
   }
 }
@@ -514,7 +557,7 @@ bool photo_has_input_media(FileManager *file_manager, const Photo &photo, bool i
     if (file_view.is_encrypted()) {
       return false;
     }
-    return file_view.has_remote_location() || file_view.has_url();
+    return /* file_view.has_remote_location() || */ file_view.has_url();
   }
 }
 
@@ -527,7 +570,7 @@ tl_object_ptr<telegram_api::InputMedia> photo_get_input_media(FileManager *file_
     if (file_view.is_encrypted()) {
       return nullptr;
     }
-    if (file_view.has_remote_location() && !file_view.remote_location().is_web()) {
+    if (file_view.has_remote_location() && !file_view.remote_location().is_web() && input_file == nullptr) {
       int32 flags = 0;
       if (ttl != 0) {
         flags |= telegram_api::inputMediaPhoto::TTL_SECONDS_MASK;
@@ -542,7 +585,9 @@ tl_object_ptr<telegram_api::InputMedia> photo_get_input_media(FileManager *file_
       LOG(INFO) << "Create inputMediaPhotoExternal with a URL " << file_view.url() << " and ttl " << ttl;
       return make_tl_object<telegram_api::inputMediaPhotoExternal>(flags, file_view.url(), ttl);
     }
-    CHECK(!file_view.has_remote_location());
+    if (input_file == nullptr) {
+      CHECK(!file_view.has_remote_location());
+    }
   }
   if (input_file != nullptr) {
     int32 flags = 0;
@@ -610,6 +655,10 @@ SecretInputMedia photo_get_secret_input_media(FileManager *file_manager, const P
           BufferSlice(encryption_key.key_slice()), BufferSlice(encryption_key.iv_slice()), caption)};
 }
 
+vector<FileId> photo_get_file_ids(const Photo &photo) {
+  return transform(photo.photos, [](auto &size) { return size.file_id; });
+}
+
 bool operator==(const Photo &lhs, const Photo &rhs) {
   return lhs.id == rhs.id && lhs.photos == rhs.photos;
 }
@@ -620,6 +669,64 @@ bool operator!=(const Photo &lhs, const Photo &rhs) {
 
 StringBuilder &operator<<(StringBuilder &string_builder, const Photo &photo) {
   return string_builder << "[id = " << photo.id << ", photos = " << format::as_array(photo.photos) << "]";
+}
+
+static tl_object_ptr<telegram_api::FileLocation> copy_location(
+    const tl_object_ptr<telegram_api::FileLocation> &location_ptr) {
+  CHECK(location_ptr != nullptr);
+  switch (location_ptr->get_id()) {
+    case telegram_api::fileLocationUnavailable::ID: {
+      auto location = static_cast<const telegram_api::fileLocationUnavailable *>(location_ptr.get());
+      return make_tl_object<telegram_api::fileLocationUnavailable>(location->volume_id_, location->local_id_,
+                                                                   location->secret_);
+    }
+    case telegram_api::fileLocation::ID: {
+      auto location = static_cast<const telegram_api::fileLocation *>(location_ptr.get());
+      return make_tl_object<telegram_api::fileLocation>(location->dc_id_, location->volume_id_, location->local_id_,
+                                                        location->secret_, location->file_reference_.clone());
+    }
+    default:
+      UNREACHABLE();
+      return nullptr;
+  }
+}
+
+tl_object_ptr<telegram_api::userProfilePhoto> convert_photo_to_profile_photo(
+    const tl_object_ptr<telegram_api::photo> &photo) {
+  CHECK(photo != nullptr);
+  tl_object_ptr<telegram_api::FileLocation> photo_small;
+  tl_object_ptr<telegram_api::FileLocation> photo_big;
+  for (auto &size_ptr : photo->sizes_) {
+    switch (size_ptr->get_id()) {
+      case telegram_api::photoSizeEmpty::ID:
+        break;
+      case telegram_api::photoSize::ID: {
+        auto size = static_cast<const telegram_api::photoSize *>(size_ptr.get());
+        if (size->type_ == "a") {
+          photo_small = copy_location(size->location_);
+        } else if (size->type_ == "c") {
+          photo_big = copy_location(size->location_);
+        }
+        break;
+      }
+      case telegram_api::photoCachedSize::ID: {
+        auto size = static_cast<const telegram_api::photoCachedSize *>(size_ptr.get());
+        if (size->type_ == "a") {
+          photo_small = copy_location(size->location_);
+        } else if (size->type_ == "c") {
+          photo_big = copy_location(size->location_);
+        }
+        break;
+      }
+      default:
+        UNREACHABLE();
+        break;
+    }
+  }
+  if (photo_small == nullptr || photo_big == nullptr) {
+    return nullptr;
+  }
+  return make_tl_object<telegram_api::userProfilePhoto>(photo->id_, std::move(photo_small), std::move(photo_big));
 }
 
 }  // namespace td

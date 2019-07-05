@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,8 +8,8 @@
 
 #include "td/actor/actor.h"
 
+#include "td/utils/common.h"
 #include "td/utils/Heap.h"
-#include "td/utils/logging.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Time.h"
 
@@ -49,8 +49,8 @@ class Timeout final : public Actor {
  private:
   friend class Scheduler;
 
-  Callback callback_;
-  Data data_;
+  Callback callback_{};
+  Data data_{};
 
   void set_timeout_at(double timeout) {
     Actor::set_timeout_at(timeout);
@@ -111,6 +111,8 @@ class MultiTimeout final : public Actor {
 
   void cancel_timeout(int64 key);
 
+  void run_all();
+
  private:
   friend class Scheduler;
 
@@ -119,11 +121,12 @@ class MultiTimeout final : public Actor {
 
   KHeap<double> timeout_queue_;
   std::set<Item> items_;
-  std::vector<int64> expired_;
 
   void update_timeout();
 
   void timeout_expired() override;
+
+  vector<int64> get_expired_keys(double now);
 };
 
 }  // namespace td

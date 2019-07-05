@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -272,7 +272,7 @@ string get_emoji_fingerprint(uint64 num) {
       // comment for clang-format
       u8"\U0001f537"};
 
-  return emojis[(num & 0x7FFFFFFFFFFFFFFF) % emojis.size()].str();
+  return emojis[static_cast<size_t>((num & 0x7FFFFFFFFFFFFFFF) % emojis.size())].str();
 }
 
 Result<string> check_url(MutableSlice url) {

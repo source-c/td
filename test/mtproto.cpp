@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2018
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2019
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -10,19 +10,24 @@
 #include "td/actor/PromiseFuture.h"
 
 #include "td/mtproto/crypto.h"
+#include "td/mtproto/DhHandshake.h"
 #include "td/mtproto/Handshake.h"
 #include "td/mtproto/HandshakeActor.h"
-#include "td/mtproto/HandshakeConnection.h"
 #include "td/mtproto/PingConnection.h"
 #include "td/mtproto/RawConnection.h"
+#include "td/mtproto/TransportType.h"
 
+#include "td/net/GetHostByNameActor.h"
 #include "td/net/Socks5.h"
 #include "td/net/TransparentProxy.h"
 
 #include "td/telegram/ConfigManager.h"
 #include "td/telegram/net/DcId.h"
 #include "td/telegram/net/PublicRsaKeyShared.h"
+#include "td/telegram/NotificationManager.h"
 
+#include "td/utils/base64.h"
+#include "td/utils/common.h"
 #include "td/utils/logging.h"
 #include "td/utils/port/IPAddress.h"
 #include "td/utils/port/SocketFd.h"
@@ -31,7 +36,82 @@
 REGISTER_TESTS(mtproto);
 
 using namespace td;
-using namespace mtproto;
+
+TEST(Mtproto, GetHostByNameActor) {
+  SET_VERBOSITY_LEVEL(VERBOSITY_NAME(ERROR));
+  ConcurrentScheduler sched;
+  int threads_n = 1;
+  sched.init(threads_n);
+
+  int cnt = 1;
+  vector<ActorOwn<GetHostByNameActor>> actors;
+  {
+    auto guard = sched.get_main_guard();
+
+    auto run = [&](ActorId<GetHostByNameActor> actor_id, string host, bool prefer_ipv6, bool allow_ok,
+                   bool allow_error) {
+      auto promise = PromiseCreator::lambda([&cnt, &actors, num = cnt, host, allow_ok,
+                                             allow_error](Result<IPAddress> r_ip_address) {
+        if (r_ip_address.is_error() && !allow_error) {
+          LOG(ERROR) << num << " \"" << host << "\" " << r_ip_address.error();
+        }
+        if (r_ip_address.is_ok() && !allow_ok && (r_ip_address.ok().is_ipv6() || r_ip_address.ok().get_ipv4() != 0)) {
+          LOG(ERROR) << num << " \"" << host << "\" " << r_ip_address.ok();
+        }
+        if (--cnt == 0) {
+          actors.clear();
+          Scheduler::instance()->finish();
+        }
+      });
+      cnt++;
+      send_closure(actor_id, &GetHostByNameActor::run, host, 443, prefer_ipv6, std::move(promise));
+    };
+
+    std::vector<std::string> hosts = {"127.0.0.2",
+                                      "1.1.1.1",
+                                      "localhost",
+                                      "web.telegram.org",
+                                      "web.telegram.org.",
+                                      "москва.рф",
+                                      "",
+                                      "%",
+                                      " ",
+                                      "a",
+                                      "\x80",
+                                      "127.0.0.1.",
+                                      "0x12.0x34.0x56.0x78",
+                                      "0x7f.001",
+                                      "2001:0db8:85a3:0000:0000:8a2e:0370:7334"};
+    for (auto types : {vector<GetHostByNameActor::ResolverType>{GetHostByNameActor::ResolverType::Native},
+                       vector<GetHostByNameActor::ResolverType>{GetHostByNameActor::ResolverType::Google},
+                       vector<GetHostByNameActor::ResolverType>{GetHostByNameActor::ResolverType::Google,
+                                                                GetHostByNameActor::ResolverType::Google,
+                                                                GetHostByNameActor::ResolverType::Native}}) {
+      GetHostByNameActor::Options options;
+      options.resolver_types = types;
+      options.scheduler_id = threads_n;
+
+      auto actor = create_actor<GetHostByNameActor>("GetHostByNameActor", std::move(options));
+      auto actor_id = actor.get();
+      actors.push_back(std::move(actor));
+
+      for (auto host : hosts) {
+        for (auto prefer_ipv6 : {false, true}) {
+          bool allow_ok = host.size() > 2;
+          bool allow_both = host == "127.0.0.1." || host == "localhost" || (host == "москва.рф" && prefer_ipv6);
+          bool allow_error = !allow_ok || allow_both;
+          run(actor_id, host, prefer_ipv6, allow_ok, allow_error);
+        }
+      }
+    }
+  }
+  cnt--;
+  sched.start();
+  while (sched.run_main(10)) {
+    // empty
+  }
+  sched.finish();
+}
 
 TEST(Mtproto, config) {
   ConcurrentScheduler sched;
@@ -40,7 +120,7 @@ TEST(Mtproto, config) {
 
   int cnt = 1;
   {
-    auto guard = sched.get_current_guard();
+    auto guard = sched.get_main_guard();
 
     auto run = [&](auto &func, bool is_test) {
       auto promise = PromiseCreator::lambda([&, num = cnt](Result<SimpleConfig> r_simple_config) {
@@ -86,22 +166,21 @@ class TestPingActor : public Actor {
 
  private:
   IPAddress ip_address_;
-  std::unique_ptr<mtproto::PingConnection> ping_connection_;
+  unique_ptr<mtproto::PingConnection> ping_connection_;
   Status *result_;
 
   void start_up() override {
-    ping_connection_ = std::make_unique<mtproto::PingConnection>(
-        std::make_unique<mtproto::RawConnection>(SocketFd::open(ip_address_).move_as_ok(),
-                                                 mtproto::TransportType{mtproto::TransportType::Tcp, 0, ""}, nullptr),
+    ping_connection_ = make_unique<mtproto::PingConnection>(
+        make_unique<mtproto::RawConnection>(SocketFd::open(ip_address_).move_as_ok(),
+                                            mtproto::TransportType{mtproto::TransportType::Tcp, 0, ""}, nullptr),
         3);
 
-    ping_connection_->get_pollable().set_observer(this);
-    subscribe(ping_connection_->get_pollable());
+    Scheduler::subscribe(ping_connection_->get_poll_info().extract_pollable_fd(this));
     set_timeout_in(10);
     yield();
   }
   void tear_down() override {
-    unsubscribe_before_close(ping_connection_->get_pollable());
+    Scheduler::unsubscribe_before_close(ping_connection_->get_poll_info().get_pollable_fd_ref());
     ping_connection_->close();
     Scheduler::instance()->finish();
   }
@@ -138,7 +217,7 @@ static int32 get_default_dc_id() {
   return 10002;
 }
 
-class Mtproto_ping : public td::Test {
+class Mtproto_ping : public Test {
  public:
   using Test::Test;
   bool step() final {
@@ -165,9 +244,9 @@ class Mtproto_ping : public td::Test {
   ConcurrentScheduler sched_;
   Status result_;
 };
-Mtproto_ping mtproto_ping("Mtproto_ping");
+RegisterTest<Mtproto_ping> mtproto_ping("Mtproto_ping");
 
-class Context : public AuthKeyHandshakeContext {
+class HandshakeContext : public mtproto::AuthKeyHandshakeContext {
  public:
   DhCallback *get_dh_callback() override {
     return nullptr;
@@ -177,7 +256,7 @@ class Context : public AuthKeyHandshakeContext {
   }
 
  private:
-  PublicRsaKeyShared public_rsa_key{DcId::empty()};
+  PublicRsaKeyShared public_rsa_key{DcId::empty(), false};
 };
 
 class HandshakeTestActor : public Actor {
@@ -189,9 +268,9 @@ class HandshakeTestActor : public Actor {
   int32 dc_id_ = 0;
   Status *result_;
   bool wait_for_raw_connection_ = false;
-  std::unique_ptr<RawConnection> raw_connection_;
+  unique_ptr<mtproto::RawConnection> raw_connection_;
   bool wait_for_handshake_ = false;
-  std::unique_ptr<AuthKeyHandshake> handshake_;
+  unique_ptr<mtproto::AuthKeyHandshake> handshake_;
   Status status_;
   bool wait_for_result_ = false;
 
@@ -204,11 +283,11 @@ class HandshakeTestActor : public Actor {
   void loop() override {
     if (!wait_for_raw_connection_ && !raw_connection_) {
       raw_connection_ =
-          std::make_unique<mtproto::RawConnection>(SocketFd::open(get_default_ip_address()).move_as_ok(),
-                                                   mtproto::TransportType{mtproto::TransportType::Tcp, 0, ""}, nullptr);
+          make_unique<mtproto::RawConnection>(SocketFd::open(get_default_ip_address()).move_as_ok(),
+                                              mtproto::TransportType{mtproto::TransportType::Tcp, 0, ""}, nullptr);
     }
     if (!wait_for_handshake_ && !handshake_) {
-      handshake_ = std::make_unique<AuthKeyHandshake>(dc_id_, 0);
+      handshake_ = make_unique<mtproto::AuthKeyHandshake>(dc_id_, 0);
     }
     if (raw_connection_ && handshake_) {
       if (wait_for_result_) {
@@ -226,12 +305,12 @@ class HandshakeTestActor : public Actor {
       }
 
       wait_for_result_ = true;
-      create_actor<HandshakeActor>(
-          "HandshakeActor", std::move(handshake_), std::move(raw_connection_), std::make_unique<Context>(), 10.0,
-          PromiseCreator::lambda([self = actor_id(this)](Result<std::unique_ptr<RawConnection>> raw_connection) {
+      create_actor<mtproto::HandshakeActor>(
+          "HandshakeActor", std::move(handshake_), std::move(raw_connection_), make_unique<HandshakeContext>(), 10.0,
+          PromiseCreator::lambda([self = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> raw_connection) {
             send_closure(self, &HandshakeTestActor::got_connection, std::move(raw_connection), 1);
           }),
-          PromiseCreator::lambda([self = actor_id(this)](Result<std::unique_ptr<AuthKeyHandshake>> handshake) {
+          PromiseCreator::lambda([self = actor_id(this)](Result<unique_ptr<mtproto::AuthKeyHandshake>> handshake) {
             send_closure(self, &HandshakeTestActor::got_handshake, std::move(handshake), 1);
           }))
           .release();
@@ -240,7 +319,7 @@ class HandshakeTestActor : public Actor {
     }
   }
 
-  void got_connection(Result<std::unique_ptr<RawConnection>> r_raw_connection, int32 dummy) {
+  void got_connection(Result<unique_ptr<mtproto::RawConnection>> r_raw_connection, int32 dummy) {
     CHECK(wait_for_raw_connection_);
     wait_for_raw_connection_ = false;
     if (r_raw_connection.is_ok()) {
@@ -253,7 +332,7 @@ class HandshakeTestActor : public Actor {
     loop();
   }
 
-  void got_handshake(Result<std::unique_ptr<AuthKeyHandshake>> r_handshake, int32 dummy) {
+  void got_handshake(Result<unique_ptr<mtproto::AuthKeyHandshake>> r_handshake, int32 dummy) {
     CHECK(wait_for_handshake_);
     wait_for_handshake_ = false;
     CHECK(r_handshake.is_ok());
@@ -271,7 +350,7 @@ class HandshakeTestActor : public Actor {
   }
 };
 
-class Mtproto_handshake : public td::Test {
+class Mtproto_handshake : public Test {
  public:
   using Test::Test;
   bool step() final {
@@ -298,7 +377,7 @@ class Mtproto_handshake : public td::Test {
   ConcurrentScheduler sched_;
   Status result_;
 };
-Mtproto_handshake mtproto_handshake("Mtproto_handshake");
+RegisterTest<Mtproto_handshake> mtproto_handshake("Mtproto_handshake");
 
 class Socks5TestActor : public Actor {
  public:
@@ -326,8 +405,8 @@ class Socks5TestActor : public Actor {
     IPAddress mtproto_ip = get_default_ip_address();
 
     auto r_socket = SocketFd::open(socks5_ip);
-    create_actor<Socks5>("socks5", r_socket.move_as_ok(), mtproto_ip, "", "",
-                         std::make_unique<Callback>(std::move(promise)), actor_shared())
+    create_actor<Socks5>("socks5", r_socket.move_as_ok(), mtproto_ip, "", "", make_unique<Callback>(std::move(promise)),
+                         actor_shared())
         .release();
   }
 
@@ -350,4 +429,37 @@ TEST(Mtproto, socks5) {
     // empty;
   }
   sched.finish();
+}
+
+TEST(Mtproto, notifications) {
+  vector<string> pushes = {
+      "eyJwIjoiSkRnQ3NMRWxEaWhyVWRRN1pYM3J1WVU4TlRBMFhMb0N6UWRNdzJ1cWlqMkdRbVR1WXVvYXhUeFJHaG1QQm8yVElYZFBzX2N3b2RIb3lY"
+      "b2drVjM1dVl0UzdWeElNX1FNMDRKMG1mV3ZZWm4zbEtaVlJ0aFVBNGhYUWlaN0pfWDMyZDBLQUlEOWgzRnZwRjNXUFRHQWRaVkdFYzg3bnFPZ3hD"
+      "NUNMRkM2SU9fZmVqcEpaV2RDRlhBWWpwc1k2aktrbVNRdFZ1MzE5ZW04UFVieXZudFpfdTNud2hjQ0czMk96TGp4S1kyS1lzU21JZm1GMzRmTmw1"
+      "QUxaa2JvY2s2cE5rZEdrak9qYmRLckJyU0ZtWU8tQ0FsRE10dEplZFFnY1U5bVJQdU80b1d2NG5sb1VXS19zSlNTaXdIWEZyb1pWTnZTeFJ0Z1dN"
+      "ZyJ9",
+      "eyJwIjoiSkRnQ3NMRWxEaWlZby1GRWJndk9WaTFkUFdPVmZndzBBWHYwTWNzWDFhWEtNZC03T1Q2WWNfT0taRURHZDJsZ0h0WkhMSllyVG50RE95"
+      "TkY1aXJRQlZ4UUFLQlRBekhPTGZIS3BhQXdoaWd5b3NQd0piWnJVV2xRWmh4eEozUFUzZjBNRTEwX0xNT0pFN0xsVUFaY2dabUNaX2V1QmNPZWNK"
+      "VERxRkpIRGZjN2pBOWNrcFkyNmJRT2dPUEhCeHlEMUVrNVdQcFpLTnlBODVuYzQ1eHFPdERqcU5aVmFLU3pKb2VIcXBQMnJqR29kN2M5YkxsdGd5"
+      "Q0NGd2NBU3dJeDc3QWNWVXY1UnVZIn0"};
+  string key =
+      "uBa5yu01a-nJJeqsR3yeqMs6fJLYXjecYzFcvS6jIwS3nefBIr95LWrTm-IbRBNDLrkISz1Sv0KYpDzhU8WFRk1D0V_"
+      "qyO7XsbDPyrYxRBpGxofJUINSjb1uCxoSdoh1_F0UXEA2fWWKKVxL0DKUQssZfbVj3AbRglsWpH-jDK1oc6eBydRiS3i4j-"
+      "H0yJkEMoKRgaF9NaYI4u26oIQ-Ez46kTVU-R7e3acdofOJKm7HIKan_5ZMg82Dvec2M6vc_"
+      "I54Vs28iBx8IbBO1y5z9WSScgW3JCvFFKP2MXIu7Jow5-cpUx6jXdzwRUb9RDApwAFKi45zpv8eb3uPCDAmIQ";
+  vector<string> decrypted_payloads = {
+      "eyJsb2Nfa2V5IjoiTUVTU0FHRV9URVhUIiwibG9jX2FyZ3MiOlsiQXJzZW55IFNtaXJub3YiLCJhYmNkZWZnIl0sImN1c3RvbSI6eyJtc2dfaWQi"
+      "OiI1OTAwNDciLCJmcm9tX2lkIjoiNjI4MTQifSwiYmFkZ2UiOiI0MDkifQ",
+      "eyJsb2Nfa2V5IjoiIiwibG9jX2FyZ3MiOltdLCJjdXN0b20iOnsiY2hhbm5lbF9pZCI6IjExNzY4OTU0OTciLCJtYXhfaWQiOiIxMzU5In0sImJh"
+      "ZGdlIjoiMCJ9"};
+  key = base64url_decode(key).move_as_ok();
+
+  for (size_t i = 0; i < pushes.size(); i++) {
+    auto push = base64url_decode(pushes[i]).move_as_ok();
+    auto decrypted_payload = base64url_decode(decrypted_payloads[i]).move_as_ok();
+
+    auto key_id = DhHandshake::calc_key_id(key);
+    ASSERT_EQ(key_id, NotificationManager::get_push_receiver_id(push).ok());
+    ASSERT_EQ(decrypted_payload, NotificationManager::decrypt_push(key_id, key, push).ok());
+  }
 }
