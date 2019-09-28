@@ -49,7 +49,7 @@ vector<T> full_split(T s, char delimiter = ' ') {
   }
 }
 
-string implode(vector<string> v, char delimiter = ' ');
+string implode(const vector<string> &v, char delimiter = ' ');
 
 namespace detail {
 
@@ -303,7 +303,9 @@ T clamp(T value, T min_value, T max_value) {
 
 Result<string> hex_decode(Slice hex);
 
-string url_encode(Slice str);
+string hex_encode(Slice data);
+
+string url_encode(Slice data);
 
 // run-time checked narrowing cast (type conversion):
 
@@ -396,6 +398,8 @@ template <typename T>
 detail::reversion_wrapper<T> reversed(T &iterable) {
   return {iterable};
 }
+
+string buffer_to_hex(Slice buffer);
 
 string zero_encode(Slice data);
 

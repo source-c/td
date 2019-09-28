@@ -40,14 +40,14 @@ string HttpUrl::get_url() const {
     result += ':';
     result += to_string(specified_port_);
   }
-  CHECK(!query_.empty() && query_[0] == '/');
+  LOG_CHECK(!query_.empty() && query_[0] == '/') << query_;
   result += query_;
   return result;
 }
 
-Result<HttpUrl> parse_url(MutableSlice url, HttpUrl::Protocol default_protocol) {
+Result<HttpUrl> parse_url(Slice url, HttpUrl::Protocol default_protocol) {
   // url == [https?://][userinfo@]host[:port]
-  Parser parser(url);
+  ConstParser parser(url);
   string protocol_str = to_lower(parser.read_till_nofail(':'));
 
   HttpUrl::Protocol protocol;
@@ -61,7 +61,7 @@ Result<HttpUrl> parse_url(MutableSlice url, HttpUrl::Protocol default_protocol) 
       return Status::Error("Unsupported URL protocol");
     }
   } else {
-    parser = Parser(url);
+    parser = ConstParser(url);
     protocol = default_protocol;
   }
   Slice userinfo_host_port = parser.read_till_nofail("/?#");
@@ -187,10 +187,8 @@ string get_url_query_file_name(const string &query) {
   return query_slice.str();
 }
 
-string get_url_file_name(const string &url) {
-  // TODO remove copy
-  string url_copy = url;
-  auto r_http_url = parse_url(url_copy);
+string get_url_file_name(Slice url) {
+  auto r_http_url = parse_url(url);
   if (r_http_url.is_error()) {
     LOG(WARNING) << "Receive wrong URL \"" << url << '"';
     return string();

@@ -13,6 +13,7 @@ char disable_linker_warning_about_empty_file_gzip_cpp TD_UNUSED;
 
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include <zlib.h>
 
@@ -129,9 +130,25 @@ void Gzip::clear() {
 Gzip::Gzip() : impl_(make_unique<Impl>()) {
 }
 
-Gzip::Gzip(Gzip &&other) = default;
+Gzip::Gzip(Gzip &&other) : Gzip() {
+  swap(other);
+}
 
-Gzip &Gzip::operator=(Gzip &&other) = default;
+Gzip &Gzip::operator=(Gzip &&other) {
+  CHECK(this != &other);
+  clear();
+  swap(other);
+  return *this;
+}
+
+void Gzip::swap(Gzip &other) {
+  using std::swap;
+  swap(impl_, other.impl_);
+  swap(input_size_, other.input_size_);
+  swap(output_size_, other.output_size_);
+  swap(close_input_flag_, other.close_input_flag_);
+  swap(mode_, other.mode_);
+}
 
 Gzip::~Gzip() {
   clear();

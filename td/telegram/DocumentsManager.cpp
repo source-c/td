@@ -56,13 +56,14 @@ tl_object_ptr<td_api::document> DocumentsManager::get_document_object(FileId fil
   LOG_CHECK(document != nullptr) << tag("file_id", file_id);
   document->is_changed = false;
   return make_tl_object<td_api::document>(document->file_name, document->mime_type,
+                                          get_minithumbnail_object(document->minithumbnail),
                                           get_photo_size_object(td_->file_manager_.get(), &document->thumbnail),
                                           td_->file_manager_->get_file_object(file_id));
 }
 
 Document DocumentsManager::on_get_document(RemoteDocument remote_document, DialogId owner_dialog_id,
                                            MultiPromiseActor *load_data_multipromise_ptr,
-                                           Document::Type default_document_type) {
+                                           Document::Type default_document_type, bool is_background, bool is_pattern) {
   tl_object_ptr<telegram_api::documentAttributeAnimated> animated;
   tl_object_ptr<telegram_api::documentAttributeVideo> video;
   tl_object_ptr<telegram_api::documentAttributeAudio> audio;
@@ -187,17 +188,51 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
                  << ", has_stickers = " << has_stickers;
   }
 
+  bool has_png_thumbnail = false;
+  if (is_background) {
+    if (document_type != Document::Type::General) {
+      LOG(ERROR) << "Receive background of type " << document_type;
+      document_type = Document::Type::General;
+    }
+    file_type = FileType::Background;
+    if (is_pattern) {
+      default_extension = Slice("png");
+      has_png_thumbnail = true;
+    } else {
+      default_extension = Slice("jpg");
+    }
+  }
+
   int64 id;
   int64 access_hash;
   int32 dc_id;
   int32 size;
   string mime_type;
   string file_reference;
+  string minithumbnail;
   PhotoSize thumbnail;
   FileEncryptionKey encryption_key;
+  bool is_animated_sticker = false;
   bool is_web = false;
   bool is_web_no_proxy = false;
   string url;
+  FileLocationSource source = FileLocationSource::FromServer;
+
+  auto fix_animated_sticker_type = [&] {
+    if (mime_type != "application/x-tgsticker") {
+      return;
+    }
+
+    is_animated_sticker = true;
+    if (document_type == Document::Type::General) {
+      document_type = Document::Type::Sticker;
+      file_type = FileType::Sticker;
+      default_extension = Slice("tgs");
+      owner_dialog_id = DialogId();
+      file_name.clear();
+    }
+  };
+
   if (remote_document.document != nullptr) {
     auto document = std::move(remote_document.document);
 
@@ -208,9 +243,28 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
     mime_type = std::move(document->mime_type_);
     file_reference = document->file_reference_.as_slice().str();
 
+    fix_animated_sticker_type();
+
+    if (owner_dialog_id.get_type() == DialogType::SecretChat) {
+      // secret_api::decryptedMessageMediaExternalDocument
+      if (document_type != Document::Type::Sticker) {
+        LOG(ERROR) << "Receive " << document_type << " in " << owner_dialog_id;
+        return {};
+      }
+      source = FileLocationSource::FromUser;
+    }
+
     if (document_type != Document::Type::VoiceNote) {
-      thumbnail = get_photo_size(td_->file_manager_.get(), FileType::Thumbnail, 0, 0, "", owner_dialog_id,
-                                 std::move(document->thumb_), has_webp_thumbnail);
+      for (auto &thumb : document->thumbs_) {
+        auto photo_size = get_photo_size(td_->file_manager_.get(), {FileType::Thumbnail, 0}, id, access_hash,
+                                         file_reference, DcId::create(dc_id), owner_dialog_id, std::move(thumb),
+                                         has_webp_thumbnail, has_png_thumbnail);
+        if (photo_size.get_offset() == 0) {
+          thumbnail = std::move(photo_size.get<0>());
+        } else {
+          minithumbnail = std::move(photo_size.get<1>());
+        }
+      }
     }
   } else if (remote_document.secret_file != nullptr) {
     CHECK(remote_document.secret_document != nullptr);
@@ -228,9 +282,11 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
       return {};
     }
 
+    fix_animated_sticker_type();
+
     if (document_type != Document::Type::VoiceNote) {
-      thumbnail = get_thumbnail_photo_size(td_->file_manager_.get(), std::move(document->thumb_), owner_dialog_id,
-                                           document->thumb_w_, document->thumb_h_);
+      thumbnail = get_secret_thumbnail_photo_size(td_->file_manager_.get(), std::move(document->thumb_),
+                                                  owner_dialog_id, document->thumb_w_, document->thumb_h_);
     }
   } else {
     is_web = true;
@@ -275,9 +331,11 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
       default:
         UNREACHABLE();
     }
+
+    fix_animated_sticker_type();
   }
 
-  LOG(DEBUG) << "Receive document with id = " << id << " of type " << static_cast<int32>(document_type);
+  LOG(DEBUG) << "Receive document with id = " << id << " of type " << document_type;
   if (!is_web && !DcId::is_valid(dc_id)) {
     LOG(ERROR) << "Wrong dc_id = " << dc_id;
     return {};
@@ -296,14 +354,14 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
   FileId file_id;
   if (!is_web) {
     file_id = td_->file_manager_->register_remote(
-        FullRemoteFileLocation(file_type, id, access_hash, DcId::internal(dc_id), std::move(file_reference)),
-        FileLocationSource::FromServer, owner_dialog_id, size, 0, suggested_file_name);
+        FullRemoteFileLocation(file_type, id, access_hash, DcId::internal(dc_id), std::move(file_reference)), source,
+        owner_dialog_id, size, 0, suggested_file_name);
     if (!encryption_key.empty()) {
       td_->file_manager_->set_encryption_key(file_id, std::move(encryption_key));
     }
   } else if (!is_web_no_proxy) {
-    file_id = td_->file_manager_->register_remote(FullRemoteFileLocation(file_type, url, access_hash),
-                                                  FileLocationSource::FromServer, owner_dialog_id, 0, size, file_name);
+    file_id = td_->file_manager_->register_remote(FullRemoteFileLocation(file_type, url, access_hash), source,
+                                                  owner_dialog_id, 0, size, file_name);
   } else {
     auto r_file_id = td_->file_manager_->from_persistent_id(url, file_type);
     if (r_file_id.is_error()) {
@@ -324,8 +382,9 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
   switch (document_type) {
     case Document::Type::Animation:
       // TODO use has_stickers
-      td_->animations_manager_->create_animation(file_id, std::move(thumbnail), std::move(file_name),
-                                                 std::move(mime_type), video_duration, dimensions, !is_web);
+      td_->animations_manager_->create_animation(file_id, std::move(minithumbnail), std::move(thumbnail),
+                                                 std::move(file_name), std::move(mime_type), video_duration, dimensions,
+                                                 !is_web);
       break;
     case Document::Type::Audio: {
       int32 duration = 0;
@@ -336,25 +395,27 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
         title = std::move(audio->title_);
         performer = std::move(audio->performer_);
       }
-      td_->audios_manager_->create_audio(file_id, std::move(thumbnail), std::move(file_name), std::move(mime_type),
-                                         duration, std::move(title), std::move(performer), !is_web);
+      td_->audios_manager_->create_audio(file_id, std::move(minithumbnail), std::move(thumbnail), std::move(file_name),
+                                         std::move(mime_type), duration, std::move(title), std::move(performer),
+                                         !is_web);
       break;
     }
     case Document::Type::General:
-      td_->documents_manager_->create_document(file_id, std::move(thumbnail), std::move(file_name),
-                                               std::move(mime_type), !is_web);
+      create_document(file_id, std::move(minithumbnail), std::move(thumbnail), std::move(file_name),
+                      std::move(mime_type), !is_web);
       break;
     case Document::Type::Sticker:
-      td_->stickers_manager_->create_sticker(file_id, std::move(thumbnail), dimensions, true, std::move(sticker),
-                                             load_data_multipromise_ptr);
+      td_->stickers_manager_->create_sticker(file_id, std::move(thumbnail), dimensions, std::move(sticker),
+                                             is_animated_sticker, load_data_multipromise_ptr);
       break;
     case Document::Type::Video:
-      td_->videos_manager_->create_video(file_id, std::move(thumbnail), has_stickers, vector<FileId>(),
-                                         std::move(file_name), std::move(mime_type), video_duration, dimensions,
-                                         supports_streaming, !is_web);
+      td_->videos_manager_->create_video(file_id, std::move(minithumbnail), std::move(thumbnail), has_stickers,
+                                         vector<FileId>(), std::move(file_name), std::move(mime_type), video_duration,
+                                         dimensions, supports_streaming, !is_web);
       break;
     case Document::Type::VideoNote:
-      td_->video_notes_manager_->create_video_note(file_id, std::move(thumbnail), video_duration, dimensions, !is_web);
+      td_->video_notes_manager_->create_video_note(file_id, std::move(minithumbnail), std::move(thumbnail),
+                                                   video_duration, dimensions, !is_web);
       break;
     case Document::Type::VoiceNote: {
       int32 duration = 0;
@@ -376,6 +437,7 @@ Document DocumentsManager::on_get_document(RemoteDocument remote_document, Dialo
 
 FileId DocumentsManager::on_get_document(unique_ptr<GeneralDocument> new_document, bool replace) {
   auto file_id = new_document->file_id;
+  CHECK(file_id.is_valid());
   LOG(INFO) << "Receive document " << file_id;
   auto &d = documents_[new_document->file_id];
   if (d == nullptr) {
@@ -390,6 +452,10 @@ FileId DocumentsManager::on_get_document(unique_ptr<GeneralDocument> new_documen
     if (d->file_name != new_document->file_name) {
       LOG(DEBUG) << "Document " << file_id << " file_name has changed";
       d->file_name = new_document->file_name;
+      d->is_changed = true;
+    }
+    if (d->minithumbnail != new_document->minithumbnail) {
+      d->minithumbnail = std::move(new_document->minithumbnail);
       d->is_changed = true;
     }
     if (d->thumbnail != new_document->thumbnail) {
@@ -407,12 +473,13 @@ FileId DocumentsManager::on_get_document(unique_ptr<GeneralDocument> new_documen
   return file_id;
 }
 
-void DocumentsManager::create_document(FileId file_id, PhotoSize thumbnail, string file_name, string mime_type,
-                                       bool replace) {
+void DocumentsManager::create_document(FileId file_id, string minithumbnail, PhotoSize thumbnail, string file_name,
+                                       string mime_type, bool replace) {
   auto d = make_unique<GeneralDocument>();
   d->file_id = file_id;
   d->file_name = std::move(file_name);
   d->mime_type = std::move(mime_type);
+  d->minithumbnail = std::move(minithumbnail);
   d->thumbnail = std::move(thumbnail);
   on_get_document(std::move(d), replace);
 }

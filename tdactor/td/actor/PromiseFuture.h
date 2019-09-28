@@ -8,14 +8,13 @@
 
 #include "td/actor/actor.h"
 
+#include "td/utils/CancellationToken.h"
 #include "td/utils/Closure.h"
 #include "td/utils/common.h"
 #include "td/utils/invoke.h"  // for tuple_for_each
 #include "td/utils/ScopeGuard.h"
 #include "td/utils/Status.h"
 
-#include <atomic>
-#include <memory>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -170,42 +169,6 @@ Promise<T> &Promise<T>::operator=(SafePromise<T> &&other) {
   return *this;
 }
 
-class CancellationToken {
- public:
-  explicit CancellationToken(bool init = false) {
-    if (init) {
-      ptr_ = std::make_shared<std::atomic<bool>>(false);
-    }
-  }
-  CancellationToken(const CancellationToken &other) = default;
-  CancellationToken &operator=(const CancellationToken &other) {
-    cancel();
-    ptr_ = other.ptr_;
-    return *this;
-  }
-  CancellationToken(CancellationToken &&other) = default;
-  CancellationToken &operator=(CancellationToken &&other) {
-    cancel();
-    ptr_ = std::move(other.ptr_);
-    return *this;
-  }
-  ~CancellationToken() {
-    cancel();
-  }
-  bool is_canceled() const {
-    return !ptr_ || *ptr_;
-  }
-  void cancel() {
-    if (ptr_) {
-      ptr_->store(true, std::memory_order_relaxed);
-      ptr_.reset();
-    }
-  }
-
- private:
-  std::shared_ptr<std::atomic<bool>> ptr_;
-};
-
 namespace detail {
 
 class EventPromise : public PromiseInterface<Unit> {
@@ -287,7 +250,7 @@ class CancellablePromise : public PromiseT {
     return true;
   }
   virtual bool is_cancelled() const {
-    return cancellation_token_.is_canceled();
+    return static_cast<bool>(cancellation_token_);
   }
 
  private:

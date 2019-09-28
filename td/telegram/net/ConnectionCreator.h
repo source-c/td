@@ -13,15 +13,18 @@
 #include "td/telegram/net/DcOptions.h"
 #include "td/telegram/net/DcOptionsSet.h"
 #include "td/telegram/net/NetQuery.h"
+#include "td/telegram/net/Proxy.h"
 #include "td/telegram/StateManager.h"
 
+#include "td/mtproto/AuthData.h"
+#include "td/mtproto/RawConnection.h"
 #include "td/mtproto/TransportType.h"
+
+#include "td/net/NetStats.h"
 
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
 #include "td/actor/SignalSlot.h"
-
-#include "td/net/NetStats.h"
 
 #include "td/utils/common.h"
 #include "td/utils/FloodControlStrict.h"
@@ -30,119 +33,27 @@
 #include "td/utils/port/SocketFd.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
-#include "td/utils/StringBuilder.h"
 #include "td/utils/Time.h"
 
 #include <map>
 #include <memory>
+#include <set>
 #include <unordered_map>
 #include <utility>
 
 namespace td {
-namespace mtproto {
-class RawConnection;
-}  // namespace mtproto
+
 namespace detail {
 class StatsCallback;
-}
+}  // namespace detail
+
 class GetHostByNameActor;
+
 }  // namespace td
 
 namespace td {
 
 extern int VERBOSITY_NAME(connections);
-
-class Proxy {
- public:
-  static Proxy socks5(string server, int32 port, string user, string password) {
-    Proxy proxy;
-    proxy.type_ = Type::Socks5;
-    proxy.server_ = std::move(server);
-    proxy.port_ = std::move(port);
-    proxy.user_ = std::move(user);
-    proxy.password_ = std::move(password);
-    return proxy;
-  }
-
-  static Proxy http_tcp(string server, int32 port, string user, string password) {
-    Proxy proxy;
-    proxy.type_ = Type::HttpTcp;
-    proxy.server_ = std::move(server);
-    proxy.port_ = std::move(port);
-    proxy.user_ = std::move(user);
-    proxy.password_ = std::move(password);
-    return proxy;
-  }
-
-  static Proxy http_caching(string server, int32 port, string user, string password) {
-    Proxy proxy;
-    proxy.type_ = Type::HttpCaching;
-    proxy.server_ = std::move(server);
-    proxy.port_ = std::move(port);
-    proxy.user_ = std::move(user);
-    proxy.password_ = std::move(password);
-    return proxy;
-  }
-
-  static Proxy mtproto(string server, int32 port, string secret) {
-    Proxy proxy;
-    proxy.type_ = Type::Mtproto;
-    proxy.server_ = std::move(server);
-    proxy.port_ = std::move(port);
-    proxy.secret_ = std::move(secret);
-    return proxy;
-  }
-
-  CSlice server() const {
-    return server_;
-  }
-
-  int32 port() const {
-    return port_;
-  }
-
-  CSlice user() const {
-    return user_;
-  }
-
-  CSlice password() const {
-    return password_;
-  }
-
-  CSlice secret() const {
-    return secret_;
-  }
-
-  enum class Type : int32 { None, Socks5, Mtproto, HttpTcp, HttpCaching };
-  Type type() const {
-    return type_;
-  }
-
-  template <class StorerT>
-  void store(StorerT &storer) const;
-
-  template <class ParserT>
-  void parse(ParserT &parser);
-
- private:
-  Type type_{Type::None};
-  string server_;
-  int32 port_ = 0;
-  string user_;
-  string password_;
-  string secret_;
-};
-
-inline bool operator==(const Proxy &lhs, const Proxy &rhs) {
-  return lhs.type() == rhs.type() && lhs.server() == rhs.server() && lhs.port() == rhs.port() &&
-         lhs.user() == rhs.user() && lhs.password() == rhs.password() && lhs.secret() == rhs.secret();
-}
-
-inline bool operator!=(const Proxy &lhs, const Proxy &rhs) {
-  return !(lhs == rhs);
-}
-
-StringBuilder &operator<<(StringBuilder &string_builder, const Proxy &proxy);
 
 class ConnectionCreator : public NetQueryCallback {
  public:
@@ -156,8 +67,10 @@ class ConnectionCreator : public NetQueryCallback {
   void on_pong(size_t hash);
   void on_mtproto_error(size_t hash);
   void request_raw_connection(DcId dc_id, bool allow_media_only, bool is_media,
-                              Promise<unique_ptr<mtproto::RawConnection>> promise, size_t hash = 0);
-  void request_raw_connection_by_ip(IPAddress ip_address, Promise<unique_ptr<mtproto::RawConnection>> promise);
+                              Promise<unique_ptr<mtproto::RawConnection>> promise, size_t hash = 0,
+                              unique_ptr<mtproto::AuthData> auth_data = {});
+  void request_raw_connection_by_ip(IPAddress ip_address, mtproto::TransportType transport_type,
+                                    Promise<unique_ptr<mtproto::RawConnection>> promise);
 
   void set_net_stats_callback(std::shared_ptr<NetStatsCallback> common_callback,
                               std::shared_ptr<NetStatsCallback> media_callback);
@@ -170,6 +83,20 @@ class ConnectionCreator : public NetQueryCallback {
   void get_proxies(Promise<td_api::object_ptr<td_api::proxies>> promise);
   void get_proxy_link(int32 proxy_id, Promise<string> promise);
   void ping_proxy(int32 proxy_id, Promise<double> promise);
+
+  struct ConnectionData {
+    SocketFd socket_fd;
+    StateManager::ConnectionToken connection_token;
+    unique_ptr<mtproto::RawConnection::StatsCallback> stats_callback;
+  };
+
+  static DcOptions get_default_dc_options(bool is_test);
+
+  static ActorOwn<> prepare_connection(SocketFd socket_fd, const Proxy &proxy, const IPAddress &mtproto_ip,
+                                       mtproto::TransportType transport_type, Slice actor_name_prefix, Slice debug_str,
+                                       unique_ptr<mtproto::RawConnection::StatsCallback> stats_callback,
+                                       ActorShared<> parent, bool use_connection_token,
+                                       Promise<ConnectionData> promise);
 
  private:
   ActorShared<> parent_;
@@ -219,6 +146,8 @@ class ConnectionCreator : public NetQueryCallback {
       int32 next_delay_ = 1;
     };
     ClientInfo();
+    int64 extract_session_id();
+    void add_session_id(int64 session_id);
 
     Backoff backoff;
     FloodControlStrict flood_control;
@@ -237,6 +166,9 @@ class ConnectionCreator : public NetQueryCallback {
     DcId dc_id;
     bool allow_media_only;
     bool is_media;
+    std::set<int64> session_ids_;
+    unique_ptr<mtproto::AuthData> auth_data;
+    uint64 auth_data_generation{0};
   };
   std::map<size_t, ClientInfo> clients_;
 
@@ -290,15 +222,11 @@ class ConnectionCreator : public NetQueryCallback {
 
   void client_wakeup(size_t hash);
   void client_loop(ClientInfo &client);
-  struct ConnectionData {
-    SocketFd socket_fd;
-    StateManager::ConnectionToken connection_token;
-    unique_ptr<detail::StatsCallback> stats_callback;
-  };
   void client_create_raw_connection(Result<ConnectionData> r_connection_data, bool check_mode,
                                     mtproto::TransportType transport_type, size_t hash, string debug_str,
                                     uint32 network_generation);
-  void client_add_connection(size_t hash, Result<unique_ptr<mtproto::RawConnection>> r_raw_connection, bool check_flag);
+  void client_add_connection(size_t hash, Result<unique_ptr<mtproto::RawConnection>> r_raw_connection, bool check_flag,
+                             uint64 auth_data_generation, int64 session_id);
   void client_set_timeout_at(ClientInfo &client, double wakeup_at);
 
   void on_get_proxy_info(telegram_api::object_ptr<telegram_api::help_ProxyData> proxy_data_ptr);
@@ -307,8 +235,6 @@ class ConnectionCreator : public NetQueryCallback {
 
   void on_proxy_resolved(Result<IPAddress> ip_address, bool dummy);
 
-  static DcOptions get_default_dc_options(bool is_test);
-
   struct FindConnectionExtra {
     DcOptionsSet::Stat *stat{nullptr};
     mtproto::TransportType transport_type;
@@ -316,13 +242,12 @@ class ConnectionCreator : public NetQueryCallback {
     IPAddress mtproto_ip;
     bool check_mode{false};
   };
-  class ProxyInfo;
 
-  static Result<mtproto::TransportType> get_transport_type(const ProxyInfo &proxy,
+  static Result<mtproto::TransportType> get_transport_type(const Proxy &proxy,
                                                            const DcOptionsSet::ConnectionInfo &info);
 
-  Result<SocketFd> find_connection(const ProxyInfo &proxy, DcId dc_id, bool allow_media_only,
-                                   FindConnectionExtra &extra);
+  Result<SocketFd> find_connection(const Proxy &proxy, const IPAddress &proxy_ip_address, DcId dc_id,
+                                   bool allow_media_only, FindConnectionExtra &extra);
 
   ActorId<GetHostByNameActor> get_dns_resolver();
 

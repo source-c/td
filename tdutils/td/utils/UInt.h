@@ -9,8 +9,6 @@
 #include "td/utils/common.h"
 #include "td/utils/Slice.h"
 
-#include <cstring>
-
 namespace td {
 
 template <size_t size>
@@ -48,7 +46,7 @@ struct UInt {
 
 template <size_t size>
 bool operator==(const UInt<size> &a, const UInt<size> &b) {
-  return std::memcmp(a.raw, b.raw, sizeof(a.raw)) == 0;
+  return a.as_slice() == b.as_slice();
 }
 
 template <size_t size>
@@ -57,8 +55,8 @@ bool operator!=(const UInt<size> &a, const UInt<size> &b) {
 }
 
 template <size_t size>
-td::UInt<size> operator^(const UInt<size> &a, const UInt<size> &b) {
-  td::UInt<size> res;
+UInt<size> operator^(const UInt<size> &a, const UInt<size> &b) {
+  UInt<size> res;
   for (size_t i = 0; i < size / 8; i++) {
     res.raw[i] = static_cast<uint8>(a.raw[i] ^ b.raw[i]);
   }
@@ -84,7 +82,7 @@ MutableSlice as_slice(UInt<size> &value) {
 
 template <size_t size>
 bool operator<(const UInt<size> &a, const UInt<size> &b) {
-  return std::memcmp(a.raw, b.raw, sizeof(a.raw)) < 0;
+  return a.as_slice() < b.as_slice();
 }
 
 using UInt128 = UInt<128>;

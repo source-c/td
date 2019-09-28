@@ -16,6 +16,10 @@ namespace td {
 Timer::Timer() : start_time_(Time::now()) {
 }
 
+double Timer::elapsed() const {
+  return Time::now() - start_time_;
+}
+
 StringBuilder &operator<<(StringBuilder &string_builder, const Timer &timer) {
   return string_builder << "in " << Time::now() - timer.start_time_;
 }
@@ -32,6 +36,7 @@ PerfWarningTimer::PerfWarningTimer(PerfWarningTimer &&other)
 PerfWarningTimer::~PerfWarningTimer() {
   reset();
 }
+
 void PerfWarningTimer::reset() {
   if (start_at_ == 0) {
     return;

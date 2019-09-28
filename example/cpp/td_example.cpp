@@ -237,19 +237,21 @@ class TdExample {
               need_restart_ = true;
               std::cerr << "Terminated" << std::endl;
             },
-            [this](td_api::authorizationStateWaitCode &wait_code) {
-              std::string first_name;
-              std::string last_name;
-              if (!wait_code.is_registered_) {
-                std::cerr << "Enter your first name: ";
-                std::cin >> first_name;
-                std::cerr << "Enter your last name: ";
-                std::cin >> last_name;
-              }
+            [this](td_api::authorizationStateWaitCode &) {
               std::cerr << "Enter authentication code: ";
               std::string code;
               std::cin >> code;
-              send_query(td_api::make_object<td_api::checkAuthenticationCode>(code, first_name, last_name),
+              send_query(td_api::make_object<td_api::checkAuthenticationCode>(code),
+                         create_authentication_query_handler());
+            },
+            [this](td_api::authorizationStateWaitRegistration &) {
+              std::string first_name;
+              std::string last_name;
+              std::cerr << "Enter your first name: ";
+              std::cin >> first_name;
+              std::cerr << "Enter your last name: ";
+              std::cin >> last_name;
+              send_query(td_api::make_object<td_api::registerUser>(first_name, last_name),
                          create_authentication_query_handler());
             },
             [this](td_api::authorizationStateWaitPassword &) {
@@ -263,8 +265,7 @@ class TdExample {
               std::cerr << "Enter phone number: ";
               std::string phone_number;
               std::cin >> phone_number;
-              send_query(td_api::make_object<td_api::setAuthenticationPhoneNumber>(
-                             phone_number, false /*allow_flash_calls*/, false /*is_current_phone_number*/),
+              send_query(td_api::make_object<td_api::setAuthenticationPhoneNumber>(phone_number, nullptr),
                          create_authentication_query_handler());
             },
             [this](td_api::authorizationStateWaitEncryptionKey &) {

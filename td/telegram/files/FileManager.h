@@ -20,6 +20,7 @@
 #include "td/telegram/files/FileStats.h"
 #include "td/telegram/files/FileType.h"
 #include "td/telegram/Location.h"
+#include "td/telegram/PhotoSizeSource.h"
 
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
@@ -159,8 +160,9 @@ class FileNode {
   bool is_download_offset_dirty_ = false;
   bool is_download_limit_dirty_ = false;
 
-  bool get_by_hash_ = false;
+  bool get_by_hash_{false};
   bool can_search_locally_{true};
+  bool need_reload_photo_{false};
 
   bool is_download_started_ = false;
   bool generate_was_update_ = false;
@@ -212,7 +214,7 @@ class ConstFileNodePtr {
   }
 
   explicit operator bool() const {
-    return bool(file_node_ptr_);
+    return static_cast<bool>(file_node_ptr_);
   }
   const FullRemoteFileLocation *get_remote() const {
     return file_node_ptr_.get_remote();
@@ -300,6 +302,19 @@ class FileView {
     return node_->encryption_key_;
   }
 
+  bool may_reload_photo() const {
+    if (!has_remote_location()) {
+      return false;
+    }
+    if (!remote_location().is_photo()) {
+      return false;
+    }
+    auto type = remote_location().get_source().get_type();
+    return type == PhotoSizeSource::Type::DialogPhotoBig || type == PhotoSizeSource::Type::DialogPhotoSmall ||
+           type == PhotoSizeSource::Type::StickerSetThumbnail;
+    return false;
+  }
+
  private:
   ConstFileNodePtr node_{};
 };
@@ -346,8 +361,6 @@ class FileManager : public FileLoadManager::Callback {
 
     virtual bool add_file_source(FileId file_id, FileSourceId file_source_id) = 0;
 
-    virtual FileSourceId get_wallpapers_file_source_id() = 0;
-
     virtual bool remove_file_source(FileId file_id, FileSourceId file_source_id) = 0;
 
     virtual void on_merge_files(FileId to_file_id, FileId from_file_id) = 0;
@@ -355,6 +368,8 @@ class FileManager : public FileLoadManager::Callback {
     virtual vector<FileSourceId> get_some_file_sources(FileId file_id) = 0;
 
     virtual void repair_file_reference(FileId file_id, Promise<Unit> promise) = 0;
+
+    virtual void reload_photo(PhotoSizeSource source, Promise<Unit> promise) = 0;
 
     virtual ActorShared<> create_reference() = 0;
 
@@ -454,8 +469,9 @@ class FileManager : public FileLoadManager::Callback {
   FileId parse_file(ParserT &parser);
 
  private:
-  static constexpr char PERSISTENT_ID_VERSION = 2;
+  static constexpr char PERSISTENT_ID_VERSION_OLD = 2;
   static constexpr char PERSISTENT_ID_VERSION_MAP = 3;
+  static constexpr char PERSISTENT_ID_VERSION = 4;
 
   Result<FileId> check_input_file_id(FileType type, Result<FileId> result, bool is_encrypted, bool allow_zero,
                                      bool is_secure) TD_WARN_UNUSED_RESULT;
@@ -476,6 +492,7 @@ class FileManager : public FileLoadManager::Callback {
       UploadWaitFileReference,
       Upload,
       DownloadWaitFileReferece,
+      DownloadReloadDialog,
       Download,
       SetContent,
       Generate
@@ -547,6 +564,7 @@ class FileManager : public FileLoadManager::Callback {
   FileId register_pmc_file_data(FileData &&data);
 
   Status check_local_location(FileNodePtr node);
+  bool try_fix_partial_local_location(FileNodePtr node);
   Status check_local_location(FullLocalFileLocation &location, int64 &size);
   void try_flush_node_full(FileNodePtr node, bool new_remote, bool new_local, bool new_generate, FileDbId other_pmc_id);
   void try_flush_node(FileNodePtr node, const char *source);
@@ -561,6 +579,8 @@ class FileManager : public FileLoadManager::Callback {
 
   Result<FileId> from_persistent_id_map(Slice binary, FileType file_type);
   Result<FileId> from_persistent_id_v2(Slice binary, FileType file_type);
+  Result<FileId> from_persistent_id_v3(Slice binary, FileType file_type);
+  Result<FileId> from_persistent_id_v23(Slice binary, FileType file_type, int32 version);
 
   string fix_file_extension(Slice file_name, Slice file_type, Slice file_extension);
   string get_file_name(FileType file_type, Slice path);

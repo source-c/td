@@ -9,6 +9,7 @@
 #include "td/telegram/ConfigShared.h"
 #include "td/telegram/Global.h"
 #include "td/telegram/logevent/LogEvent.h"
+#include "td/telegram/net/AuthDataShared.h"
 #include "td/telegram/net/ConnectionCreator.h"
 #include "td/telegram/net/DcId.h"
 #include "td/telegram/net/DcOptions.h"
@@ -25,6 +26,7 @@
 #include "td/mtproto/AuthKey.h"
 #include "td/mtproto/crypto.h"
 #include "td/mtproto/RawConnection.h"
+#include "td/mtproto/TransportType.h"
 
 #if !TD_EMSCRIPTEN  //FIXME
 #include "td/net/HttpQuery.h"
@@ -42,6 +44,7 @@
 #include "td/utils/JsonBuilder.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
+#include "td/utils/Parser.h"
 #include "td/utils/port/Clocks.h"
 #include "td/utils/Random.h"
 #include "td/utils/Time.h"
@@ -57,8 +60,85 @@ namespace td {
 
 int VERBOSITY_NAME(config_recoverer) = VERBOSITY_NAME(INFO);
 
+Result<int32> HttpDate::to_unix_time(int32 year, int32 month, int32 day, int32 hour, int32 minute, int32 second) {
+  if (year < 1970 || year > 2037) {
+    return Status::Error("Invalid year");
+  }
+  if (month < 1 || month > 12) {
+    return Status::Error("Invalid month");
+  }
+  if (day < 1 || day > days_in_month(year, month)) {
+    return Status::Error("Invalid day");
+  }
+  if (hour < 0 || hour >= 24) {
+    return Status::Error("Invalid hour");
+  }
+  if (minute < 0 || minute >= 60) {
+    return Status::Error("Invalid minute");
+  }
+  if (second < 0 || second > 60) {
+    return Status::Error("Invalid second");
+  }
+
+  int32 res = 0;
+  for (int32 y = 1970; y < year; y++) {
+    res += (is_leap(y) + 365) * seconds_in_day();
+  }
+  for (int32 m = 1; m < month; m++) {
+    res += days_in_month(year, m) * seconds_in_day();
+  }
+  res += (day - 1) * seconds_in_day();
+  res += hour * 60 * 60;
+  res += minute * 60;
+  res += second;
+  return res;
+}
+
+Result<int32> HttpDate::parse_http_date(std::string slice) {
+  Parser p(slice);
+  p.read_till(',');  // ignore week day
+  p.skip(',');
+  p.skip_whitespaces();
+  p.skip_nofail('0');
+  TRY_RESULT(day, to_integer_safe<int32>(p.read_word()));
+  auto month_name = p.read_word();
+  to_lower_inplace(month_name);
+  TRY_RESULT(year, to_integer_safe<int32>(p.read_word()));
+  p.skip_whitespaces();
+  p.skip_nofail('0');
+  TRY_RESULT(hour, to_integer_safe<int32>(p.read_till(':')));
+  p.skip(':');
+  p.skip_nofail('0');
+  TRY_RESULT(minute, to_integer_safe<int32>(p.read_till(':')));
+  p.skip(':');
+  p.skip_nofail('0');
+  TRY_RESULT(second, to_integer_safe<int32>(p.read_word()));
+  auto gmt = p.read_word();
+  TRY_STATUS(std::move(p.status()));
+  if (gmt != "GMT") {
+    return Status::Error("Timezone must be GMT");
+  }
+
+  static Slice month_names[12] = {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"};
+
+  int month = 0;
+
+  for (int m = 1; m <= 12; m++) {
+    if (month_names[m - 1] == month_name) {
+      month = m;
+      break;
+    }
+  }
+
+  if (month == 0) {
+    return Status::Error("Unknown month name");
+  }
+
+  return HttpDate::to_unix_time(year, month, day, hour, minute, second);
+}
+
 Result<SimpleConfig> decode_config(Slice input) {
-  static auto rsa = td::RSA::from_pem(
+  static auto rsa = RSA::from_pem(
                         "-----BEGIN RSA PUBLIC KEY-----\n"
                         "MIIBCgKCAQEAyr+18Rex2ohtVy8sroGP\n"
                         "BwXD3DOoKCSpjDqYoXgCqB7ioln4eDCFfOBUlfXUEvM/fnKCpF46VkAftlb4VuPD\n"
@@ -91,33 +171,34 @@ Result<SimpleConfig> decode_config(Slice input) {
   UInt128 iv;
   as_slice(key).copy_from(data_rsa_slice.substr(0, 32));
   as_slice(iv).copy_from(data_rsa_slice.substr(16, 16));
-  aes_cbc_decrypt(key, &iv, data_cbc, data_cbc);
+  aes_cbc_decrypt(as_slice(key), as_slice(iv), data_cbc, data_cbc);
 
   CHECK(data_cbc.size() == 224);
   string hash(32, ' ');
   sha256(data_cbc.substr(0, 208), MutableSlice(hash));
   if (data_cbc.substr(208) != Slice(hash).substr(0, 16)) {
-    return Status::Error("sha256 mismatch");
+    return Status::Error("SHA256 mismatch");
   }
 
   TlParser len_parser{data_cbc};
   int len = len_parser.fetch_int();
-  if (len < 0 || len > 204) {
+  if (len < 8 || len > 208) {
     return Status::Error(PSLICE() << "Invalid " << tag("data length", len) << " after aes_cbc_decrypt");
   }
   int constructor_id = len_parser.fetch_int();
   if (constructor_id != telegram_api::help_configSimple::ID) {
     return Status::Error(PSLICE() << "Wrong " << tag("constructor", format::as_hex(constructor_id)));
   }
-  BufferSlice raw_config(data_cbc.substr(8, len));
+  BufferSlice raw_config(data_cbc.substr(8, len - 8));
   TlBufferParser parser{&raw_config};
   auto config = telegram_api::help_configSimple::fetch(parser);
+  parser.fetch_end();
   TRY_STATUS(parser.get_status());
   return std::move(config);
 }
 
-static ActorOwn<> get_simple_config_impl(Promise<SimpleConfig> promise, int32 scheduler_id, string url, string host,
-                                         bool prefer_ipv6) {
+static ActorOwn<> get_simple_config_impl(Promise<SimpleConfigResult> promise, int32 scheduler_id, string url,
+                                         string host, bool prefer_ipv6) {
   VLOG(config_recoverer) << "Request simple config from " << url;
 #if TD_EMSCRIPTEN  // FIXME
   return ActorOwn<>();
@@ -126,10 +207,13 @@ static ActorOwn<> get_simple_config_impl(Promise<SimpleConfig> promise, int32 sc
   const int ttl = 3;
   return ActorOwn<>(create_actor_on_scheduler<Wget>(
       "Wget", scheduler_id,
-      PromiseCreator::lambda([promise = std::move(promise)](Result<HttpQueryPtr> r_query) mutable {
-        promise.set_result([&]() -> Result<SimpleConfig> {
+      PromiseCreator::lambda([promise = std::move(promise)](Result<unique_ptr<HttpQuery>> r_query) mutable {
+        promise.set_result([&]() -> Result<SimpleConfigResult> {
           TRY_RESULT(http_query, std::move(r_query));
-          return decode_config(http_query->content_);
+          SimpleConfigResult res;
+          res.r_http_date = HttpDate::parse_http_date(http_query->get_header("date").str());
+          res.r_config = decode_config(http_query->content_);
+          return std::move(res);
         }());
       }),
       std::move(url), std::vector<std::pair<string, string>>({{"Host", std::move(host)}}), timeout, ttl, prefer_ipv6,
@@ -137,7 +221,7 @@ static ActorOwn<> get_simple_config_impl(Promise<SimpleConfig> promise, int32 sc
 #endif
 }
 
-ActorOwn<> get_simple_config_azure(Promise<SimpleConfig> promise, const ConfigShared *shared_config, bool is_test,
+ActorOwn<> get_simple_config_azure(Promise<SimpleConfigResult> promise, const ConfigShared *shared_config, bool is_test,
                                    int32 scheduler_id) {
   string url = PSTRING() << "https://software-download.microsoft.com/" << (is_test ? "test" : "prod")
                          << "v2/config.txt";
@@ -145,8 +229,8 @@ ActorOwn<> get_simple_config_azure(Promise<SimpleConfig> promise, const ConfigSh
   return get_simple_config_impl(std::move(promise), scheduler_id, std::move(url), "tcdnb.azureedge.net", prefer_ipv6);
 }
 
-ActorOwn<> get_simple_config_google_dns(Promise<SimpleConfig> promise, const ConfigShared *shared_config, bool is_test,
-                                        int32 scheduler_id) {
+ActorOwn<> get_simple_config_google_dns(Promise<SimpleConfigResult> promise, const ConfigShared *shared_config,
+                                        bool is_test, int32 scheduler_id) {
   VLOG(config_recoverer) << "Request simple config from Google DNS";
 #if TD_EMSCRIPTEN  // FIXME
   return ActorOwn<>();
@@ -155,40 +239,46 @@ ActorOwn<> get_simple_config_google_dns(Promise<SimpleConfig> promise, const Con
   const int timeout = 10;
   const int ttl = 3;
   const bool prefer_ipv6 = shared_config == nullptr ? false : shared_config->get_option_boolean("prefer_ipv6");
-  if (name.empty()) {
-    name = is_test ? "tapv2.stel.com" : "apv2.stel.com";
+  if (name.empty() || true) {
+    name = is_test ? "tapv3.stel.com" : "apv3.stel.com";
   }
   return ActorOwn<>(create_actor_on_scheduler<Wget>(
       "Wget", scheduler_id,
-      PromiseCreator::lambda([promise = std::move(promise)](Result<HttpQueryPtr> r_query) mutable {
-        promise.set_result([&]() -> Result<SimpleConfig> {
+      PromiseCreator::lambda([promise = std::move(promise)](Result<unique_ptr<HttpQuery>> r_query) mutable {
+        promise.set_result([&]() -> Result<SimpleConfigResult> {
           TRY_RESULT(http_query, std::move(r_query));
-          TRY_RESULT(json, json_decode(http_query->content_));
-          if (json.type() != JsonValue::Type::Object) {
-            return Status::Error("json error");
-          }
-          auto &answer_object = json.get_object();
-          TRY_RESULT(answer, get_json_object_field(answer_object, "Answer", JsonValue::Type::Array, false));
-          auto &answer_array = answer.get_array();
-          vector<string> parts;
-          for (auto &v : answer_array) {
-            if (v.type() != JsonValue::Type::Object) {
-              return Status::Error("json error");
+
+          SimpleConfigResult res;
+          res.r_http_date = HttpDate::parse_http_date(http_query->get_header("date").str());
+          res.r_config = [&]() -> Result<SimpleConfig> {
+            TRY_RESULT(json, json_decode(http_query->content_));
+            if (json.type() != JsonValue::Type::Object) {
+              return Status::Error("JSON error");
             }
-            auto &data_object = v.get_object();
-            TRY_RESULT(part, get_json_object_string_field(data_object, "data", false));
-            parts.push_back(std::move(part));
-          }
-          if (parts.size() != 2) {
-            return Status::Error("Expected data in two parts");
-          }
-          string data;
-          if (parts[0].size() < parts[1].size()) {
-            data = parts[1] + parts[0];
-          } else {
-            data = parts[0] + parts[1];
-          }
-          return decode_config(data);
+            auto &answer_object = json.get_object();
+            TRY_RESULT(answer, get_json_object_field(answer_object, "Answer", JsonValue::Type::Array, false));
+            auto &answer_array = answer.get_array();
+            vector<string> parts;
+            for (auto &v : answer_array) {
+              if (v.type() != JsonValue::Type::Object) {
+                return Status::Error("JSON error");
+              }
+              auto &data_object = v.get_object();
+              TRY_RESULT(part, get_json_object_string_field(data_object, "data", false));
+              parts.push_back(std::move(part));
+            }
+            if (parts.size() != 2) {
+              return Status::Error("Expected data in two parts");
+            }
+            string data;
+            if (parts[0].size() < parts[1].size()) {
+              data = parts[1] + parts[0];
+            } else {
+              data = parts[0] + parts[1];
+            }
+            return decode_config(data);
+          }();
+          return std::move(res);
         }());
       }),
       PSTRING() << "https://www.google.com/resolve?name=" << url_encode(name) << "&type=16",
@@ -197,21 +287,25 @@ ActorOwn<> get_simple_config_google_dns(Promise<SimpleConfig> promise, const Con
 #endif
 }
 
-ActorOwn<> get_full_config(DcId dc_id, IPAddress ip_address, Promise<FullConfig> promise) {
+ActorOwn<> get_full_config(DcOption option, Promise<FullConfig> promise, ActorShared<> parent) {
   class SessionCallback : public Session::Callback {
    public:
-    SessionCallback(ActorShared<> parent, IPAddress address)
-        : parent_(std::move(parent)), address_(std::move(address)) {
+    SessionCallback(ActorShared<> parent, DcOption option) : parent_(std::move(parent)), option_(std::move(option)) {
     }
     void on_failed() final {
     }
     void on_closed() final {
     }
-    void request_raw_connection(Promise<unique_ptr<mtproto::RawConnection>> promise) final {
+    void request_raw_connection(unique_ptr<mtproto::AuthData> auth_data,
+                                Promise<unique_ptr<mtproto::RawConnection>> promise) final {
       request_raw_connection_cnt_++;
-      VLOG(config_recoverer) << "Request full config from " << address_ << ", try = " << request_raw_connection_cnt_;
+      VLOG(config_recoverer) << "Request full config from " << option_.get_ip_address()
+                             << ", try = " << request_raw_connection_cnt_;
       if (request_raw_connection_cnt_ <= 2) {
-        send_closure(G()->connection_creator(), &ConnectionCreator::request_raw_connection_by_ip, address_,
+        send_closure(G()->connection_creator(), &ConnectionCreator::request_raw_connection_by_ip,
+                     option_.get_ip_address(),
+                     mtproto::TransportType{mtproto::TransportType::ObfuscatedTcp,
+                                            narrow_cast<int16>(option_.get_dc_id().get_raw_id()), option_.get_secret()},
                      std::move(promise));
       } else {
         // Delay all queries except first forever
@@ -227,7 +321,7 @@ ActorOwn<> get_full_config(DcId dc_id, IPAddress ip_address, Promise<FullConfig>
 
    private:
     ActorShared<> parent_;
-    IPAddress address_;
+    DcOption option_;
     size_t request_raw_connection_cnt_{0};
     std::vector<Promise<unique_ptr<mtproto::RawConnection>>> delay_forever_;
   };
@@ -251,9 +345,9 @@ ActorOwn<> get_full_config(DcId dc_id, IPAddress ip_address, Promise<FullConfig>
       }
       return res;
     }
-    std::pair<AuthState, bool> get_auth_state() override {
+    std::pair<AuthKeyState, bool> get_auth_key_state() override {
       auto auth_key = get_auth_key();
-      AuthState state = AuthDataShared::get_auth_state(auth_key);
+      AuthKeyState state = AuthDataShared::get_auth_key_state(auth_key);
       return std::make_pair(state, auth_key.was_auth_flag());
     }
     void set_auth_key(const mtproto::AuthKey &auth_key) override {
@@ -308,16 +402,16 @@ ActorOwn<> get_full_config(DcId dc_id, IPAddress ip_address, Promise<FullConfig>
 
   class GetConfigActor : public NetQueryCallback {
    public:
-    GetConfigActor(DcId dc_id, IPAddress ip_address, Promise<FullConfig> promise)
-        : dc_id_(dc_id), ip_address_(std::move(ip_address)), promise_(std::move(promise)) {
+    GetConfigActor(DcOption option, Promise<FullConfig> promise, ActorShared<> parent)
+        : option_(std::move(option)), promise_(std::move(promise)), parent_(std::move(parent)) {
     }
 
    private:
     void start_up() override {
-      auto session_callback = make_unique<SessionCallback>(actor_shared(this, 1), std::move(ip_address_));
+      auto auth_data = std::make_shared<SimpleAuthData>(option_.get_dc_id());
+      int32 int_dc_id = option_.get_dc_id().get_raw_id();
+      auto session_callback = make_unique<SessionCallback>(actor_shared(this, 1), std::move(option_));
 
-      auto auth_data = std::make_shared<SimpleAuthData>(dc_id_);
-      int32 int_dc_id = dc_id_.get_raw_id();
       if (G()->is_test_dc()) {
         int_dc_id += 10000;
       }
@@ -353,13 +447,13 @@ ActorOwn<> get_full_config(DcId dc_id, IPAddress ip_address, Promise<FullConfig>
       session_.reset();
     }
 
-    DcId dc_id_;
-    IPAddress ip_address_;
+    DcOption option_;
     ActorOwn<Session> session_;
     Promise<FullConfig> promise_;
+    ActorShared<> parent_;
   };
 
-  return ActorOwn<>(create_actor<GetConfigActor>("GetConfigActor", dc_id, std::move(ip_address), std::move(promise)));
+  return ActorOwn<>(create_actor<GetConfigActor>("GetConfigActor", option, std::move(promise), std::move(parent)));
 }
 
 class ConfigRecoverer : public Actor {
@@ -428,9 +522,31 @@ class ConfigRecoverer : public Actor {
     return found;
   }
 
-  void on_simple_config(Result<SimpleConfig> r_simple_config, bool dummy) {
+  void on_simple_config(Result<SimpleConfigResult> r_simple_config_result, bool dummy) {
     simple_config_query_.reset();
     dc_options_i_ = 0;
+
+    SimpleConfigResult cfg;
+    if (r_simple_config_result.is_error()) {
+      cfg.r_http_date = r_simple_config_result.error().clone();
+      cfg.r_config = r_simple_config_result.move_as_error();
+    } else {
+      cfg = r_simple_config_result.move_as_ok();
+    }
+
+    if (cfg.r_http_date.is_ok() && (date_option_i_ == 0 || cfg.r_config.is_error())) {
+      G()->update_dns_time_difference(cfg.r_http_date.ok() - Time::now());
+    } else if (cfg.r_config.is_ok()) {
+      G()->update_dns_time_difference(cfg.r_config.ok()->date_ - Time::now());
+    }
+    date_option_i_ = (date_option_i_ + 1) % 2;
+
+    do_on_simple_config(std::move(cfg.r_config));
+    update_dc_options();
+    loop();
+  }
+
+  void do_on_simple_config(Result<SimpleConfig> r_simple_config) {
     if (r_simple_config.is_ok()) {
       auto config = r_simple_config.move_as_ok();
       VLOG(config_recoverer) << "Receive raw " << to_string(config);
@@ -464,8 +580,6 @@ class ConfigRecoverer : public Actor {
       simple_config_ = DcOptions();
       simple_config_expires_at_ = get_failed_config_expire_time();
     }
-    update_dc_options();
-    loop();
   }
 
   void on_full_config(Result<FullConfig> r_full_config, bool dummy) {
@@ -518,6 +632,8 @@ class ConfigRecoverer : public Actor {
   DcOptions dc_options_;  // dc_options_update_ + simple_config_
   double dc_options_at_{0};
   size_t dc_options_i_;
+
+  size_t date_option_i_{0};
 
   FullConfig full_config_;
   double full_config_expires_at_{0};
@@ -586,9 +702,10 @@ class ConfigRecoverer : public Actor {
     if (need_simple_config) {
       ref_cnt_++;
       VLOG(config_recoverer) << "ASK SIMPLE CONFIG";
-      auto promise = PromiseCreator::lambda([actor_id = actor_shared(this)](Result<SimpleConfig> r_simple_config) {
-        send_closure(actor_id, &ConfigRecoverer::on_simple_config, std::move(r_simple_config), false);
-      });
+      auto promise =
+          PromiseCreator::lambda([actor_id = actor_shared(this)](Result<SimpleConfigResult> r_simple_config) {
+            send_closure(actor_id, &ConfigRecoverer::on_simple_config, std::move(r_simple_config), false);
+          });
       auto get_simple_config = [&]() {
         switch (simple_config_turn_ % 3) {
           case 1:
@@ -607,11 +724,12 @@ class ConfigRecoverer : public Actor {
     if (need_full_config) {
       ref_cnt_++;
       VLOG(config_recoverer) << "ASK FULL CONFIG";
-      full_config_query_ = get_full_config(
-          dc_options_.dc_options[dc_options_i_].get_dc_id(), dc_options_.dc_options[dc_options_i_].get_ip_address(),
-          PromiseCreator::lambda([actor_id = actor_shared(this)](Result<FullConfig> r_full_config) {
-            send_closure(actor_id, &ConfigRecoverer::on_full_config, std::move(r_full_config), false);
-          }));
+      full_config_query_ =
+          get_full_config(dc_options_.dc_options[dc_options_i_],
+                          PromiseCreator::lambda([actor_id = actor_id(this)](Result<FullConfig> r_full_config) {
+                            send_closure(actor_id, &ConfigRecoverer::on_full_config, std::move(r_full_config), false);
+                          }),
+                          actor_shared(this));
       dc_options_i_ = (dc_options_i_ + 1) % dc_options_.dc_options.size();
     }
 

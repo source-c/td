@@ -20,6 +20,7 @@
 #include "td/actor/PromiseFuture.h"
 
 #include "td/utils/buffer.h"
+#include "td/utils/CancellationToken.h"
 #include "td/utils/common.h"
 #include "td/utils/List.h"
 #include "td/utils/Status.h"
@@ -55,7 +56,8 @@ class Session final
     virtual ~Callback() = default;
     virtual void on_failed() = 0;
     virtual void on_closed() = 0;
-    virtual void request_raw_connection(Promise<unique_ptr<mtproto::RawConnection>>) = 0;
+    virtual void request_raw_connection(unique_ptr<mtproto::AuthData> auth_data,
+                                        Promise<unique_ptr<mtproto::RawConnection>>) = 0;
     virtual void on_tmp_auth_key_updated(mtproto::AuthKey auth_key) = 0;
     virtual void on_server_salt_updated(std::vector<mtproto::ServerSalt> server_salts) {
     }
@@ -128,7 +130,7 @@ class Session final
     int8 connection_id;
     Mode mode;
     enum class State : int8 { Empty, Connecting, Ready } state = State::Empty;
-    CancellationToken cancellation_token_;
+    CancellationTokenSource cancellation_token_source_;
     unique_ptr<mtproto::SessionConnection> connection;
     bool ask_info;
     double wakeup_at = 0;
@@ -173,7 +175,6 @@ class Session final
 
   // mtproto::Connection::Callback
   void on_connected() override;
-  void on_before_close() override;
   void on_closed(Status status) override;
 
   Status on_pong() override;

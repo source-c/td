@@ -6,19 +6,20 @@
 //
 #pragma once
 
+#include "td/mtproto/ProxySecret.h"
+
 #include "td/utils/common.h"
 
 namespace td {
 namespace mtproto {
 
 struct TransportType {
-  enum Type { Tcp, ObfuscatedTcp, Http } type;
-  int16 dc_id;
-  string secret;
+  enum Type { Tcp, ObfuscatedTcp, Http } type = Tcp;
+  int16 dc_id{0};
+  ProxySecret secret;
 
-  TransportType() : type(Tcp), dc_id(0), secret() {
-  }
-  TransportType(Type type, int16 dc_id, string secret) : type(type), dc_id(dc_id), secret(std::move(secret)) {
+  TransportType() = default;
+  TransportType(Type type, int16 dc_id, ProxySecret secret) : type(type), dc_id(dc_id), secret(std::move(secret)) {
   }
 };
 

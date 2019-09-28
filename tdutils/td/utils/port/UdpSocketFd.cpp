@@ -652,7 +652,7 @@ class UdpSocketFdImpl {
     //};
     struct std::array<detail::UdpSocketSendHelper, 16> helpers;
     struct std::array<struct mmsghdr, 16> headers;
-    size_t to_send = td::min(messages.size(), headers.size());
+    size_t to_send = min(messages.size(), headers.size());
     for (size_t i = 0; i < to_send; i++) {
       helpers[i].to_native(messages[i], headers[i].msg_hdr);
       headers[i].msg_len = 0;
@@ -703,7 +703,7 @@ class UdpSocketFdImpl {
     //};
     struct std::array<detail::UdpSocketReceiveHelper, 16> helpers;
     struct std::array<struct mmsghdr, 16> headers;
-    size_t to_receive = td::min(messages.size(), headers.size());
+    size_t to_receive = min(messages.size(), headers.size());
     for (size_t i = 0; i < to_receive; i++) {
       helpers[i].to_native(messages[i], headers[i].msg_hdr);
       headers[i].msg_len = 0;
@@ -784,6 +784,47 @@ bool UdpSocketFd::empty() const {
 const NativeFd &UdpSocketFd::get_native_fd() const {
   return get_poll_info().native_fd();
 }
+
+#if TD_PORT_POSIX
+static Result<uint32> maximize_buffer(int socket_fd, int optname, uint32 max) {
+  /* Start with the default size. */
+  uint32 old_size;
+  socklen_t intsize = sizeof(old_size);
+  if (getsockopt(socket_fd, SOL_SOCKET, optname, &old_size, &intsize)) {
+    return OS_ERROR("getsockopt() failed");
+  }
+
+  /* Binary-search for the real maximum. */
+  uint32 last_good = old_size;
+  uint32 min = old_size;
+  while (min <= max) {
+    uint32 avg = min + (max - min) / 2;
+    if (setsockopt(socket_fd, SOL_SOCKET, optname, &avg, intsize) == 0) {
+      last_good = avg;
+      min = avg + 1;
+    } else {
+      max = avg - 1;
+    }
+  }
+  return last_good;
+}
+
+Result<uint32> UdpSocketFd::maximize_snd_buffer(uint32 max) {
+  return maximize_buffer(get_native_fd().fd(), SO_SNDBUF, max == 0 ? default_udp_max_snd_buffer_size : max);
+}
+
+Result<uint32> UdpSocketFd::maximize_rcv_buffer(uint32 max) {
+  return maximize_buffer(get_native_fd().fd(), SO_RCVBUF, max == 0 ? default_udp_max_rcv_buffer_size : max);
+}
+#else
+Result<uint32> UdpSocketFd::maximize_snd_buffer(uint32 max) {
+  return 0;
+}
+Result<uint32> UdpSocketFd::maximize_rcv_buffer(uint32 max) {
+  return 0;
+}
+#endif
+
 #if TD_PORT_POSIX
 Status UdpSocketFd::send_message(const OutboundMessage &message, bool &is_sent) {
   return impl_->send_message(message, is_sent);

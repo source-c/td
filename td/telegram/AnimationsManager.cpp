@@ -162,12 +162,14 @@ tl_object_ptr<td_api::animation> AnimationsManager::get_animation_object(FileId 
   animation->is_changed = false;
   return make_tl_object<td_api::animation>(animation->duration, animation->dimensions.width,
                                            animation->dimensions.height, animation->file_name, animation->mime_type,
+                                           get_minithumbnail_object(animation->minithumbnail),
                                            get_photo_size_object(td_->file_manager_.get(), &animation->thumbnail),
                                            td_->file_manager_->get_file_object(file_id));
 }
 
 FileId AnimationsManager::on_get_animation(unique_ptr<Animation> new_animation, bool replace) {
   auto file_id = new_animation->file_id;
+  CHECK(file_id.is_valid());
   auto &a = animations_[file_id];
   LOG(INFO) << (a == nullptr ? "Add" : (replace ? "Replace" : "Ignore")) << " animation " << file_id << " of size "
             << new_animation->dimensions;
@@ -193,6 +195,10 @@ FileId AnimationsManager::on_get_animation(unique_ptr<Animation> new_animation, 
     if (a->duration != new_animation->duration) {
       LOG(DEBUG) << "Animation " << file_id << " duration has changed";
       a->duration = new_animation->duration;
+      a->is_changed = true;
+    }
+    if (a->minithumbnail != new_animation->minithumbnail) {
+      a->minithumbnail = std::move(new_animation->minithumbnail);
       a->is_changed = true;
     }
     if (a->thumbnail != new_animation->thumbnail) {
@@ -283,14 +289,15 @@ bool AnimationsManager::merge_animations(FileId new_id, FileId old_id, bool can_
   return true;
 }
 
-void AnimationsManager::create_animation(FileId file_id, PhotoSize thumbnail, string file_name, string mime_type,
-                                         int32 duration, Dimensions dimensions, bool replace) {
+void AnimationsManager::create_animation(FileId file_id, string minithumbnail, PhotoSize thumbnail, string file_name,
+                                         string mime_type, int32 duration, Dimensions dimensions, bool replace) {
   auto a = make_unique<Animation>();
   a->file_id = file_id;
   a->file_name = std::move(file_name);
   a->mime_type = std::move(mime_type);
   a->duration = max(duration, 0);
   a->dimensions = dimensions;
+  a->minithumbnail = std::move(minithumbnail);
   a->thumbnail = std::move(thumbnail);
   on_get_animation(std::move(a), replace);
 }

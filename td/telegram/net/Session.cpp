@@ -71,7 +71,7 @@ class GenAuthKeyActor : public Actor {
   Promise<unique_ptr<mtproto::RawConnection>> connection_promise_;
   Promise<unique_ptr<mtproto::AuthKeyHandshake>> handshake_promise_;
   std::shared_ptr<Session::Callback> callback_;
-  CancellationToken cancellation_token_{true};
+  CancellationTokenSource cancellation_token_source_;
 
   ActorOwn<mtproto::HandshakeActor> child_;
 
@@ -79,10 +79,12 @@ class GenAuthKeyActor : public Actor {
     // Bug in Android clang and MSVC
     // std::tuple<Result<int>> b(std::forward_as_tuple(Result<int>()));
 
-    callback_->request_raw_connection(PromiseCreator::cancellable_lambda(
-        cancellation_token_, [actor_id = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> r_raw_connection) {
-          send_closure(actor_id, &GenAuthKeyActor::on_connection, std::move(r_raw_connection), false);
-        }));
+    callback_->request_raw_connection(
+        nullptr, PromiseCreator::cancellable_lambda(
+                     cancellation_token_source_.get_cancellation_token(),
+                     [actor_id = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> r_raw_connection) {
+                       send_closure(actor_id, &GenAuthKeyActor::on_connection, std::move(r_raw_connection), false);
+                     }));
   }
 
   void hangup() override {
@@ -399,14 +401,13 @@ void Session::on_server_time_difference_updated() {
   shared_auth_data_->update_server_time_difference(auth_data_.get_server_time_difference());
 }
 
-void Session::on_before_close() {
-  Scheduler::unsubscribe_before_close(current_info_->connection->get_poll_info().get_pollable_fd_ref());
-}
-
 void Session::on_closed(Status status) {
   if (!close_flag_ && is_main_) {
     connection_token_.reset();
   }
+  auto raw_connection = current_info_->connection->move_as_raw_connection();
+  Scheduler::unsubscribe_before_close(raw_connection->get_poll_info().get_pollable_fd_ref());
+  raw_connection->close();
 
   if (status.is_error()) {
     LOG(WARNING) << "Session closed: " << status << " " << current_info_->connection->get_name();
@@ -659,16 +660,20 @@ Status Session::on_message_result_ok(uint64 id, BufferSlice packet, size_t origi
 
 void Session::on_message_result_error(uint64 id, int error_code, BufferSlice message) {
   // UNAUTHORIZED
-  // TODO: some errors shouldn't cause loss of authorizations. Especially when PFS will be used
   if (error_code == 401 && message.as_slice() != CSlice("SESSION_PASSWORD_NEEDED")) {
     if (auth_data_.use_pfs() && message.as_slice() == CSlice("AUTH_KEY_PERM_EMPTY")) {
-      LOG(ERROR) << "Receive AUTH_KEY_PERM_EMPTY in session " << auth_data_.get_session_id() << " for auth key "
-                 << auth_data_.get_tmp_auth_key().id();
+      LOG(INFO) << "Receive AUTH_KEY_PERM_EMPTY in session " << auth_data_.get_session_id() << " for auth key "
+                << auth_data_.get_tmp_auth_key().id();
       auth_data_.drop_tmp_auth_key();
       on_tmp_auth_key_updated();
       error_code = 500;
     } else {
-      LOG(WARNING) << "Lost authorization due to " << tag("msg", message.as_slice());
+      if (message.as_slice() == CSlice("USER_DEACTIVATED_BAN")) {
+        LOG(PLAIN) << "Your account was suspended for suspicious activity. If you think that this is a mistake, please "
+                      "write to recover@telegram.org your phone number and other details to recover the account.";
+      } else {
+        LOG(WARNING) << "Lost authorization due to " << tag("msg", message.as_slice());
+      }
       auth_data_.set_auth_flag(false);
       shared_auth_data_->set_auth_key(auth_data_.get_main_auth_key());
       on_session_failed(Status::OK());
@@ -863,7 +868,7 @@ void Session::connection_send_query(ConnectionInfo *info, NetQueryPtr &&net_quer
       message_id, Query{message_id, std::move(net_query), main_connection_.connection_id, Time::now_cached()});
   sent_queries_list_.put(status.first->second.get_list_node());
   if (!status.second) {
-    LOG(FATAL) << "Duplicate message_id oO [message_id=" << message_id << "]";
+    LOG(FATAL) << "Duplicate message_id [message_id = " << message_id << "]";
   }
 }
 
@@ -878,10 +883,10 @@ void Session::connection_open(ConnectionInfo *info, bool ask_info) {
   info->ask_info = ask_info;
 
   info->state = ConnectionInfo::State::Connecting;
-  info->cancellation_token_ = CancellationToken{true};
+  info->cancellation_token_source_ = CancellationTokenSource{};
   // NB: rely on constant location of info
   auto promise = PromiseCreator::cancellable_lambda(
-      info->cancellation_token_,
+      info->cancellation_token_source_.get_cancellation_token(),
       [actor_id = actor_id(this), info = info](Result<unique_ptr<mtproto::RawConnection>> res) {
         send_closure(actor_id, &Session::connection_open_finish, info, std::move(res));
       });
@@ -891,7 +896,11 @@ void Session::connection_open(ConnectionInfo *info, bool ask_info) {
     promise.set_value(std::move(cached_connection_));
   } else {
     VLOG(dc) << "Request new connection";
-    callback_->request_raw_connection(std::move(promise));
+    unique_ptr<mtproto::AuthData> auth_data;
+    if (auth_data_.use_pfs() && auth_data_.has_auth_key(Time::now())) {
+      // auth_data = make_unique<mtproto::AuthData>(auth_data_);
+    }
+    callback_->request_raw_connection(std::move(auth_data), std::move(promise));
   }
 
   info->wakeup_at = Time::now_cached() + 1000;
@@ -950,7 +959,6 @@ void Session::connection_open_finish(ConnectionInfo *info,
     }
   }
 
-  // mtproto::TransportType transport_type = raw_connection->get_transport_type();
   mtproto::SessionConnection::Mode mode;
   Slice mode_name;
   if (mode_ == Mode::Tcp) {
@@ -968,6 +976,9 @@ void Session::connection_open_finish(ConnectionInfo *info,
   auto name = PSTRING() << get_name() << "::Connect::" << mode_name << "::" << raw_connection->debug_str_;
   LOG(INFO) << "Finished to open connection " << name;
   info->connection = make_unique<mtproto::SessionConnection>(mode, std::move(raw_connection), &auth_data_);
+  if (can_destroy_auth_key()) {
+    info->connection->destroy_key();
+  }
   info->connection->set_online(connection_online_flag_, is_main_);
   info->connection->set_name(name);
   Scheduler::subscribe(info->connection->get_poll_info().extract_pollable_fd(this));
@@ -1115,21 +1126,22 @@ void Session::create_gen_auth_key_actor(HandshakeId handshake_id) {
   info.actor_ = create_actor<detail::GenAuthKeyActor>(
       PSLICE() << get_name() << "::GenAuthKey", get_name(), std::move(info.handshake_),
       td::make_unique<AuthKeyHandshakeContext>(DhCache::instance(), shared_auth_data_->public_rsa_key()),
-      PromiseCreator::lambda([self = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> r_connection) {
-        if (r_connection.is_error()) {
-          if (r_connection.error().code() != 1) {
-            LOG(WARNING) << "Failed to open connection: " << r_connection.error();
-          }
-          return;
-        }
-        send_closure(self, &Session::connection_add, r_connection.move_as_ok());
-      }),
       PromiseCreator::lambda(
-          [self = actor_shared(this, handshake_id + 1), handshake_perf = PerfWarningTimer("handshake", 1000.1)](
-              Result<unique_ptr<mtproto::AuthKeyHandshake>> handshake) mutable {
-            // later is just to avoid lost hangup
-            send_closure_later(std::move(self), &Session::on_handshake_ready, std::move(handshake));
+          [self = actor_id(this), guard = callback_](Result<unique_ptr<mtproto::RawConnection>> r_connection) {
+            if (r_connection.is_error()) {
+              if (r_connection.error().code() != 1) {
+                LOG(WARNING) << "Failed to open connection: " << r_connection.error();
+              }
+              return;
+            }
+            send_closure(self, &Session::connection_add, r_connection.move_as_ok());
           }),
+      PromiseCreator::lambda([self = actor_shared(this, handshake_id + 1),
+                              handshake_perf = PerfWarningTimer("handshake", 1000.1),
+                              guard = callback_](Result<unique_ptr<mtproto::AuthKeyHandshake>> handshake) mutable {
+        // later is just to avoid lost hangup
+        send_closure_later(std::move(self), &Session::on_handshake_ready, std::move(handshake));
+      }),
       callback_);
 }
 
@@ -1199,11 +1211,6 @@ void Session::loop() {
           // send auth.bindTempAuthKey
           connection_send_bind_key(&main_connection_);
           need_flush = true;
-        }
-      }
-      if (can_destroy_auth_key()) {
-        if (main_connection_.connection) {
-          main_connection_.connection->destroy_key();
         }
       }
       if (need_flush) {

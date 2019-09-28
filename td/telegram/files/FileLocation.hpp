@@ -10,6 +10,8 @@
 
 #include "td/telegram/files/FileType.h"
 #include "td/telegram/net/DcId.h"
+#include "td/telegram/PhotoSizeSource.hpp"
+#include "td/telegram/Version.h"
 
 #include "td/utils/common.h"
 #include "td/utils/tl_helpers.h"
@@ -43,7 +45,7 @@ void PhotoRemoteFileLocation::store(StorerT &storer) const {
   store(id_, storer);
   store(access_hash_, storer);
   store(volume_id_, storer);
-  store(secret_, storer);
+  store(source_, storer);
   store(local_id_, storer);
 }
 
@@ -53,7 +55,13 @@ void PhotoRemoteFileLocation::parse(ParserT &parser) {
   parse(id_, parser);
   parse(access_hash_, parser);
   parse(volume_id_, parser);
-  parse(secret_, parser);
+  if (parser.version() >= static_cast<int32>(Version::AddPhotoSizeSource)) {
+    parse(source_, parser);
+  } else {
+    int64 secret;
+    parse(secret, parser);
+    source_ = PhotoSizeSource(secret);
+  }
   parse(local_id_, parser);
 }
 
@@ -140,21 +148,46 @@ void FullRemoteFileLocation::parse(ParserT &parser) {
   }
 
   switch (location_type()) {
-    case LocationType::Web: {
+    case LocationType::Web:
       variant_ = WebRemoteFileLocation();
       return web().parse(parser);
-    }
-    case LocationType::Photo: {
+    case LocationType::Photo:
       variant_ = PhotoRemoteFileLocation();
-      return photo().parse(parser);
-    }
-    case LocationType::Common: {
+      photo().parse(parser);
+      if (parser.get_error() != nullptr) {
+        return;
+      }
+      switch (photo().source_.get_type()) {
+        case PhotoSizeSource::Type::Legacy:
+          break;
+        case PhotoSizeSource::Type::Thumbnail:
+          if (photo().source_.get_file_type() != file_type_ ||
+              (file_type_ != FileType::Photo && file_type_ != FileType::Thumbnail &&
+               file_type_ != FileType::EncryptedThumbnail)) {
+            parser.set_error("Invalid FileType in PhotoRemoteFileLocation Thumbnail");
+          }
+          break;
+        case PhotoSizeSource::Type::DialogPhotoSmall:
+        case PhotoSizeSource::Type::DialogPhotoBig:
+          if (file_type_ != FileType::ProfilePhoto) {
+            parser.set_error("Invalid FileType in PhotoRemoteFileLocation DialogPhoto");
+          }
+          break;
+        case PhotoSizeSource::Type::StickerSetThumbnail:
+          if (file_type_ != FileType::Thumbnail) {
+            parser.set_error("Invalid FileType in PhotoRemoteFileLocation StickerSetThumbnail");
+          }
+          break;
+        default:
+          UNREACHABLE();
+          break;
+      }
+      return;
+    case LocationType::Common:
       variant_ = CommonRemoteFileLocation();
       return common().parse(parser);
-    }
-    case LocationType::None: {
+    case LocationType::None:
       break;
-    }
   }
   parser.set_error("Invalid FileType in FullRemoteFileLocation");
 }
@@ -171,31 +204,12 @@ void FullRemoteFileLocation::AsKey::store(StorerT &storer) const {
 
 template <class StorerT>
 void RemoteFileLocation::store(StorerT &storer) const {
-  storer.store_int(variant_.get_offset());
-  bool ok{false};
-  variant_.visit([&](auto &&value) {
-    using td::store;
-    store(value, storer);
-    ok = true;
-  });
-  CHECK(ok);
+  td::store(variant_, storer);
 }
 
 template <class ParserT>
 void RemoteFileLocation::parse(ParserT &parser) {
-  auto type = static_cast<Type>(parser.fetch_int());
-  switch (type) {
-    case Type::Empty:
-      variant_ = EmptyRemoteFileLocation();
-      return;
-    case Type::Partial:
-      variant_ = PartialRemoteFileLocation();
-      return partial().parse(parser);
-    case Type::Full:
-      variant_ = FullRemoteFileLocation();
-      return full().parse(parser);
-  }
-  parser.set_error("Invalid type in RemoteFileLocation");
+  td::parse(variant_, parser);
 }
 
 template <class StorerT>
@@ -255,32 +269,19 @@ void PartialLocalFileLocationPtr::store(StorerT &storer) const {
   td::store(*location_, storer);
 }
 
+template <class ParserT>
+void PartialLocalFileLocationPtr::parse(ParserT &parser) {
+  td::parse(*location_, parser);
+}
+
 template <class StorerT>
 void LocalFileLocation::store(StorerT &storer) const {
-  using td::store;
-  store(variant_.get_offset(), storer);
-  variant_.visit([&](auto &&value) {
-    using td::store;
-    store(value, storer);
-  });
+  td::store(variant_, storer);
 }
 
 template <class ParserT>
 void LocalFileLocation::parse(ParserT &parser) {
-  using td::parse;
-  auto type = static_cast<Type>(parser.fetch_int());
-  switch (type) {
-    case Type::Empty:
-      variant_ = EmptyLocalFileLocation();
-      return;
-    case Type::Partial:
-      variant_ = PartialLocalFileLocationPtr();
-      return parse(partial(), parser);
-    case Type::Full:
-      variant_ = FullLocalFileLocation();
-      return parse(full(), parser);
-  }
-  return parser.set_error("Invalid type in LocalFileLocation");
+  td::parse(variant_, parser);
 }
 
 template <class StorerT>

@@ -181,7 +181,7 @@ class JsonObjectScope;
 
 class JsonBuilder {
  public:
-  explicit JsonBuilder(StringBuilder &&sb) : sb_(std::move(sb)) {
+  explicit JsonBuilder(StringBuilder &&sb, int32 offset = -1) : sb_(std::move(sb)), offset_(offset) {
   }
   StringBuilder &string_builder() {
     return sb_;
@@ -191,9 +191,36 @@ class JsonBuilder {
   JsonArrayScope enter_array() TD_WARN_UNUSED_RESULT;
   JsonObjectScope enter_object() TD_WARN_UNUSED_RESULT;
 
+  int32 offset() const {
+    return offset_;
+  }
+  bool is_pretty() const {
+    return offset_ >= 0;
+  }
+  void print_offset() {
+    if (offset_ >= 0) {
+      sb_ << '\n';
+      for (int x = 0; x < offset_; x++) {
+        sb_ << "   ";
+      }
+    }
+  }
+  void dec_offset() {
+    if (offset_ >= 0) {
+      CHECK(offset_ > 0);
+      offset_--;
+    }
+  }
+  void inc_offset() {
+    if (offset_ >= 0) {
+      offset_++;
+    }
+  }
+
  private:
   StringBuilder sb_;
   JsonScope *scope_ = nullptr;
+  int32 offset_;
 };
 
 class Jsonable {};
@@ -328,6 +355,7 @@ class JsonValueScope : public JsonScope {
 class JsonArrayScope : public JsonScope {
  public:
   explicit JsonArrayScope(JsonBuilder *jb) : JsonScope(jb) {
+    jb->inc_offset();
     *sb_ << "[";
   }
   JsonArrayScope(JsonArrayScope &&other) = default;
@@ -337,6 +365,8 @@ class JsonArrayScope : public JsonScope {
     }
   }
   void leave() {
+    jb_->dec_offset();
+    jb_->print_offset();
     *sb_ << "]";
   }
   template <class T>
@@ -355,6 +385,7 @@ class JsonArrayScope : public JsonScope {
     } else {
       is_first_ = true;
     }
+    jb_->print_offset();
     return jb_->enter_value();
   }
 
@@ -365,6 +396,7 @@ class JsonArrayScope : public JsonScope {
 class JsonObjectScope : public JsonScope {
  public:
   explicit JsonObjectScope(JsonBuilder *jb) : JsonScope(jb) {
+    jb->inc_offset();
     *sb_ << "{";
   }
   JsonObjectScope(JsonObjectScope &&other) = default;
@@ -374,6 +406,8 @@ class JsonObjectScope : public JsonScope {
     }
   }
   void leave() {
+    jb_->dec_offset();
+    jb_->print_offset();
     *sb_ << "}";
   }
   template <class S, class T>
@@ -392,8 +426,13 @@ class JsonObjectScope : public JsonScope {
     } else {
       is_first_ = true;
     }
+    jb_->print_offset();
     jb_->enter_value() << key;
-    *sb_ << ":";
+    if (jb_->is_pretty()) {
+      *sb_ << " : ";
+    } else {
+      *sb_ << ":";
+    }
     jb_->enter_value() << value;
     return *this;
   }
@@ -737,11 +776,14 @@ inline Result<JsonValue> json_decode(MutableSlice json) {
 }
 
 template <class StrT, class ValT>
-StrT json_encode(const ValT &val) {
+StrT json_encode(const ValT &val, bool pretty = false) {
   auto buf_len = 1 << 18;
   auto buf = StackAllocator::alloc(buf_len);
-  JsonBuilder jb(StringBuilder(buf.as_slice(), true));
+  JsonBuilder jb(StringBuilder(buf.as_slice(), true), pretty ? 0 : -1);
   jb.enter_value() << val;
+  if (pretty) {
+    jb.string_builder() << "\n";
+  }
   LOG_IF(ERROR, jb.string_builder().is_error()) << "JSON buffer overflow";
   auto slice = jb.string_builder().as_cslice();
   return StrT(slice.begin(), slice.size());

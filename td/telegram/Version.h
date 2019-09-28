@@ -8,6 +8,8 @@
 
 namespace td {
 
+constexpr int32 MTPROTO_LAYER = 98;
+
 enum class Version : int32 {
   Initial,
   StoreFileId,
@@ -29,6 +31,9 @@ enum class Version : int32 {
   AddMessageUnsupportedVersion,
   SupportInstantView2_0,
   AddNotificationGroupInfoMaxRemovedMessageId,
+  SupportMinithumbnails,
+  AddVideoCallsSupport,
+  AddPhotoSizeSource,
   Next
 };
 

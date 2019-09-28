@@ -14,6 +14,7 @@
 #include "td/utils/invoke.h"
 #include "td/utils/port/detail/ThreadIdGuard.h"
 #include "td/utils/port/thread_local.h"
+#include "td/utils/Slice.h"
 
 #include <thread>
 #include <tuple>
@@ -29,7 +30,9 @@ class ThreadStl {
   ThreadStl &operator=(const ThreadStl &other) = delete;
   ThreadStl(ThreadStl &&) = default;
   ThreadStl &operator=(ThreadStl &&) = default;
-  ~ThreadStl() = default;
+  ~ThreadStl() {
+    join();
+  }
   template <class Function, class... Args>
   explicit ThreadStl(Function &&f, Args &&... args) {
     thread_ = std::thread([args = std::make_tuple(decay_copy(std::forward<Function>(f)),
@@ -41,10 +44,16 @@ class ThreadStl {
   }
 
   void join() {
-    thread_.join();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
   }
   void detach() {
-    thread_.detach();
+    if (thread_.joinable()) {
+      thread_.detach();
+    }
+  }
+  void set_name(CSlice name) {
   }
 
   static unsigned hardware_concurrency() {

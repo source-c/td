@@ -5,8 +5,10 @@
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "td/utils/base64.h"
+#include "td/utils/benchmark.h"
 #include "td/utils/common.h"
 #include "td/utils/crypto.h"
+#include "td/utils/logging.h"
 #include "td/utils/Slice.h"
 #include "td/utils/tests.h"
 #include "td/utils/UInt.h"
@@ -43,18 +45,18 @@ TEST(Crypto, AesCtrState) {
     }
 
     td::AesCtrState state;
-    state.init(key, iv);
+    state.init(as_slice(key), as_slice(iv));
     td::string t(length, '\0');
     state.encrypt(s, t);
     ASSERT_EQ(answers1[i], td::crc32(t));
-    state.init(key, iv);
+    state.init(as_slice(key), as_slice(iv));
     state.decrypt(t, t);
     ASSERT_STREQ(s, t);
 
     for (auto &c : iv.raw) {
       c = 0xFF;
     }
-    state.init(key, iv);
+    state.init(as_slice(key), as_slice(iv));
     state.encrypt(s, t);
     ASSERT_EQ(answers2[i], td::crc32(t));
 
@@ -69,13 +71,15 @@ TEST(Crypto, Sha256State) {
     td::sha256(s, as_slice(baseline));
 
     td::Sha256State state;
-    td::sha256_init(&state);
+    state.init();
+    td::Sha256State state2 = std::move(state);
     auto v = td::rand_split(s);
     for (auto &x : v) {
-      td::sha256_update(x, &state);
+      state2.feed(x);
     }
+    state = std::move(state2);
     td::UInt256 result;
-    td::sha256_final(&state, as_slice(result));
+    state.extract(as_slice(result));
     ASSERT_TRUE(baseline == result);
   }
 }
@@ -164,7 +168,60 @@ TEST(Crypto, crc32c) {
 
   for (std::size_t i = 0; i < strings.size(); i++) {
     ASSERT_EQ(answers[i], td::crc32c(strings[i]));
+
+    auto v = td::rand_split(strings[i]);
+    td::uint32 a = 0;
+    td::uint32 b = 0;
+    for (auto &x : v) {
+      a = td::crc32c_extend(a, x);
+      auto x_crc = td::crc32c(x);
+      b = td::crc32c_extend(b, x_crc, x.size());
+    }
+    ASSERT_EQ(answers[i], a);
+    ASSERT_EQ(answers[i], b);
   }
+}
+
+TEST(Crypto, crc32c_benchmark) {
+  class Crc32cExtendBenchmark : public td::Benchmark {
+   public:
+    explicit Crc32cExtendBenchmark(size_t chunk_size) : chunk_size_(chunk_size) {
+    }
+    std::string get_description() const override {
+      return PSTRING() << "Crc32c with chunk_size=" << chunk_size_;
+    }
+    void start_up_n(int n) override {
+      if (n > (1 << 20)) {
+        cnt_ = n / (1 << 20);
+        n = (1 << 20);
+      } else {
+        cnt_ = 1;
+      }
+      data_ = std::string(n, 'a');
+    }
+    void run(int n) override {
+      td::uint32 res = 0;
+      for (int i = 0; i < cnt_; i++) {
+        td::Slice data(data_);
+        while (!data.empty()) {
+          auto head = data.substr(0, chunk_size_);
+          data = data.substr(head.size());
+          res = td::crc32c_extend(res, head);
+        }
+      }
+      td::do_not_optimize_away(res);
+    }
+
+   private:
+    size_t chunk_size_;
+    std::string data_;
+    int cnt_;
+  };
+  bench(Crc32cExtendBenchmark(2));
+  bench(Crc32cExtendBenchmark(8));
+  bench(Crc32cExtendBenchmark(32));
+  bench(Crc32cExtendBenchmark(128));
+  bench(Crc32cExtendBenchmark(65536));
 }
 #endif
 
@@ -173,6 +230,14 @@ TEST(Crypto, crc64) {
 
   for (std::size_t i = 0; i < strings.size(); i++) {
     ASSERT_EQ(answers[i], td::crc64(strings[i]));
+  }
+}
+
+TEST(Crypto, crc16) {
+  td::vector<td::uint16> answers{0, 9842, 25046, 37023};
+
+  for (std::size_t i = 0; i < strings.size(); i++) {
+    ASSERT_EQ(answers[i], td::crc16(strings[i]));
   }
 }
 

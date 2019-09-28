@@ -68,6 +68,7 @@ class SessionConnection
   SessionConnection(Mode mode, unique_ptr<RawConnection> raw_connection, AuthData *auth_data);
 
   PollableFdInfo &get_poll_info();
+  unique_ptr<RawConnection> move_as_raw_connection();
 
   // Interface
   Result<uint64> TD_WARN_UNUSED_RESULT send_query(BufferSlice buffer, bool gzip_flag, int64 message_id = 0,
@@ -90,7 +91,6 @@ class SessionConnection
     virtual ~Callback() = default;
 
     virtual void on_connected() = 0;
-    virtual void on_before_close() = 0;
     virtual void on_closed(Status status) = 0;
 
     virtual void on_auth_key_updated() = 0;

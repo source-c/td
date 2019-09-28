@@ -7,12 +7,13 @@
 #include "td/mtproto/Transport.h"
 
 #include "td/mtproto/AuthKey.h"
-#include "td/mtproto/crypto.h"
+#include "td/mtproto/KDF.h"
 
 #include "td/utils/as.h"
 #include "td/utils/crypto.h"
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
+#include "td/utils/misc.h"
 #include "td/utils/Random.h"
 #include "td/utils/Status.h"
 
@@ -143,13 +144,13 @@ size_t Transport::calc_crypto_size(size_t data_size) {
 std::pair<uint32, UInt128> Transport::calc_message_key2(const AuthKey &auth_key, int X, Slice to_encrypt) {
   // msg_key_large = SHA256 (substr (auth_key, 88+x, 32) + plaintext + random_padding);
   Sha256State state;
-  sha256_init(&state);
-  sha256_update(Slice(auth_key.key()).substr(88 + X, 32), &state);
-  sha256_update(to_encrypt, &state);
+  state.init();
+  state.feed(Slice(auth_key.key()).substr(88 + X, 32));
+  state.feed(to_encrypt);
 
   uint8 msg_key_large_raw[32];
   MutableSlice msg_key_large(msg_key_large_raw, sizeof(msg_key_large_raw));
-  sha256_final(&state, msg_key_large);
+  state.extract(msg_key_large, true);
 
   // msg_key = substr (msg_key_large, 8, 16);
   UInt128 res;
@@ -158,11 +159,10 @@ std::pair<uint32, UInt128> Transport::calc_message_key2(const AuthKey &auth_key,
   return std::make_pair(as<uint32>(msg_key_large_raw) | (1u << 31), res);
 }
 
-template <class HeaderT>
-size_t Transport::calc_crypto_size2(size_t data_size) {
-  size_t enc_size = HeaderT::encrypted_header_size();
-  size_t raw_size = sizeof(HeaderT) - enc_size;
+namespace {
+size_t do_calc_crypto_size2_basic(size_t data_size, size_t enc_size, size_t raw_size) {
   size_t encrypted_size = (enc_size + data_size + 12 + 15) & ~15;
+
   std::array<size_t, 10> sizes{{64, 128, 192, 256, 384, 512, 768, 1024, 1280}};
   for (auto size : sizes) {
     if (encrypted_size <= size) {
@@ -174,13 +174,36 @@ size_t Transport::calc_crypto_size2(size_t data_size) {
   return raw_size + encrypted_size;
 }
 
+size_t do_calc_crypto_size2_rand(size_t data_size, size_t enc_size, size_t raw_size) {
+  size_t rand_data_size = td::Random::secure_uint32() & 0xff;
+  size_t encrypted_size = (enc_size + data_size + rand_data_size + 12 + 15) & ~15;
+  return raw_size + encrypted_size;
+}
+}  // namespace
+
+template <class HeaderT>
+size_t Transport::calc_crypto_size2(size_t data_size, PacketInfo *info) {
+  if (info->size != 0) {
+    return info->size;
+  }
+
+  size_t enc_size = HeaderT::encrypted_header_size();
+  size_t raw_size = sizeof(HeaderT) - enc_size;
+  if (info->use_random_padding) {
+    info->size = narrow_cast<uint32>(do_calc_crypto_size2_rand(data_size, enc_size, raw_size));
+  } else {
+    info->size = narrow_cast<uint32>(do_calc_crypto_size2_basic(data_size, enc_size, raw_size));
+  }
+  return info->size;
+}
+
 size_t Transport::calc_no_crypto_size(size_t data_size) {
   return sizeof(NoCryptoHeader) + data_size;
 }
 
 Status Transport::read_no_crypto(MutableSlice message, PacketInfo *info, MutableSlice *data) {
   if (message.size() < sizeof(NoCryptoHeader)) {
-    return Status::Error(PSLICE() << "Invalid mtproto message: too small [message.size()=" << message.size()
+    return Status::Error(PSLICE() << "Invalid mtproto message: too small [message.size() = " << message.size()
                                   << "] < [sizeof(NoCryptoHeader) = " << sizeof(NoCryptoHeader) << "]");
   }
   size_t data_size = message.size() - sizeof(NoCryptoHeader);
@@ -193,7 +216,7 @@ template <class HeaderT, class PrefixT>
 Status Transport::read_crypto_impl(int X, MutableSlice message, const AuthKey &auth_key, HeaderT **header_ptr,
                                    PrefixT **prefix_ptr, MutableSlice *data, PacketInfo *info) {
   if (message.size() < sizeof(HeaderT)) {
-    return Status::Error(PSLICE() << "Invalid mtproto message: too small [message.size()=" << message.size()
+    return Status::Error(PSLICE() << "Invalid mtproto message: too small [message.size() = " << message.size()
                                   << "] < [sizeof(HeaderT) = " << sizeof(HeaderT) << "]");
   }
   //FIXME: rewrite without reinterpret cast
@@ -202,14 +225,14 @@ Status Transport::read_crypto_impl(int X, MutableSlice message, const AuthKey &a
   auto to_decrypt = MutableSlice(header->encrypt_begin(), message.uend());
   to_decrypt = to_decrypt.truncate(to_decrypt.size() & ~15);
   if (to_decrypt.size() % 16 != 0) {
-    return Status::Error(PSLICE() << "Invalid mtproto message: size of encrypted part is not multiple of 16 [size="
+    return Status::Error(PSLICE() << "Invalid mtproto message: size of encrypted part is not multiple of 16 [size = "
                                   << to_decrypt.size() << "]");
   }
 
   if (header->auth_key_id != auth_key.id()) {
-    return Status::Error(PSLICE() << "Invalid mtproto message: auth_key_id mismatch [found="
+    return Status::Error(PSLICE() << "Invalid mtproto message: auth_key_id mismatch [found = "
                                   << format::as_hex(header->auth_key_id)
-                                  << "] [expected=" << format::as_hex(auth_key.id()) << "]");
+                                  << "] [expected = " << format::as_hex(auth_key.id()) << "]");
   }
 
   UInt256 aes_key;
@@ -220,7 +243,7 @@ Status Transport::read_crypto_impl(int X, MutableSlice message, const AuthKey &a
     KDF2(auth_key.key(), header->message_key, X, &aes_key, &aes_iv);
   }
 
-  aes_ige_decrypt(aes_key, &aes_iv, to_decrypt, to_decrypt);
+  aes_ige_decrypt(as_slice(aes_key), as_slice(aes_iv), to_decrypt, to_decrypt);
 
   size_t tail_size = message.end() - reinterpret_cast<char *>(header->data);
   if (tail_size < sizeof(PrefixT)) {
@@ -249,9 +272,9 @@ Status Transport::read_crypto_impl(int X, MutableSlice message, const AuthKey &a
   }
 
   if (!is_key_ok) {
-    return Status::Error(PSLICE() << "Invalid mtproto message: message_key mismatch [found="
+    return Status::Error(PSLICE() << "Invalid mtproto message: message_key mismatch [found = "
                                   << format::as_hex_dump(header->message_key)
-                                  << "] [expected=" << format::as_hex_dump(real_message_key) << "]");
+                                  << "] [expected = " << format::as_hex_dump(real_message_key) << "]");
   }
 
   if (info->version == 2) {
@@ -332,7 +355,7 @@ void Transport::write_crypto_impl(int X, const Storer &storer, const AuthKey &au
   if (info->version == 1) {
     size = calc_crypto_size<HeaderT>(data_size);
   } else {
-    size = calc_crypto_size2<HeaderT>(data_size);
+    size = calc_crypto_size2<HeaderT>(data_size, info);
   }
 
   size_t pad_size = size - (sizeof(HeaderT) + data_size);
@@ -356,7 +379,7 @@ void Transport::write_crypto_impl(int X, const Storer &storer, const AuthKey &au
     KDF2(auth_key.key(), header->message_key, X, &aes_key, &aes_iv);
   }
 
-  aes_ige_encrypt(aes_key, &aes_iv, to_encrypt, to_encrypt);
+  aes_ige_encrypt(as_slice(aes_key), as_slice(aes_iv), to_encrypt, to_encrypt);
 }
 
 size_t Transport::write_crypto(const Storer &storer, const AuthKey &auth_key, PacketInfo *info, MutableSlice dest) {
@@ -365,7 +388,7 @@ size_t Transport::write_crypto(const Storer &storer, const AuthKey &auth_key, Pa
   if (info->version == 1) {
     size = calc_crypto_size<CryptoHeader>(data_size);
   } else {
-    size = calc_crypto_size2<CryptoHeader>(data_size);
+    size = calc_crypto_size2<CryptoHeader>(data_size, info);
   }
   if (size > dest.size()) {
     return size;
@@ -388,7 +411,7 @@ size_t Transport::write_e2e_crypto(const Storer &storer, const AuthKey &auth_key
   if (info->version == 1) {
     size = calc_crypto_size<EndToEndHeader>(data_size);
   } else {
-    size = calc_crypto_size2<EndToEndHeader>(data_size);
+    size = calc_crypto_size2<EndToEndHeader>(data_size, info);
   }
   if (size > dest.size()) {
     return size;
@@ -405,7 +428,7 @@ size_t Transport::write_e2e_crypto(const Storer &storer, const AuthKey &auth_key
 
 Result<uint64> Transport::read_auth_key_id(Slice message) {
   if (message.size() < 8) {
-    return Status::Error(PSLICE() << "Invalid mtproto message: smaller than 8 bytes [size=" << message.size() << "]");
+    return Status::Error(PSLICE() << "Invalid mtproto message: smaller than 8 bytes [size = " << message.size() << "]");
   }
   return as<uint64>(message.begin());
 }
@@ -413,7 +436,8 @@ Result<uint64> Transport::read_auth_key_id(Slice message) {
 Result<Transport::ReadResult> Transport::read(MutableSlice message, const AuthKey &auth_key, PacketInfo *info) {
   if (message.size() < 12) {
     if (message.size() < 4) {
-      return Status::Error(PSLICE() << "Invalid mtproto message: smaller than 4 bytes [size=" << message.size() << "]");
+      return Status::Error(PSLICE() << "Invalid mtproto message: smaller than 4 bytes [size = " << message.size()
+                                    << "]");
     }
 
     int32 code = as<int32>(message.begin());

@@ -6,11 +6,13 @@
 //
 #pragma once
 
+#include "td/telegram/ChannelId.h"
+#include "td/telegram/ChatId.h"
 #include "td/telegram/DialogId.h"
 #include "td/telegram/PtsManager.h"
-
 #include "td/telegram/td_api.h"
 #include "td/telegram/telegram_api.h"
+#include "td/telegram/UserId.h"
 
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
@@ -162,7 +164,18 @@ class UpdatesManager : public Actor {
 
   static const vector<tl_object_ptr<telegram_api::Update>> *get_updates(const telegram_api::Updates *updates_ptr);
 
+  bool is_acceptable_user(UserId user_id) const;
+
+  bool is_acceptable_chat(ChatId chat_id) const;
+
+  bool is_acceptable_channel(ChannelId channel_id) const;
+
+  bool is_acceptable_dialog(DialogId dialog_id) const;
+
   bool is_acceptable_message_entities(const vector<tl_object_ptr<telegram_api::MessageEntity>> &message_entities) const;
+
+  bool is_acceptable_message_forward_header(
+      const telegram_api::object_ptr<telegram_api::messageFwdHeader> &header) const;
 
   bool is_acceptable_message(const telegram_api::Message *message_ptr) const;
 
@@ -195,7 +208,8 @@ class UpdatesManager : public Actor {
   void on_update(tl_object_ptr<telegram_api::updateChatParticipantAdd> update, bool /*force_apply*/);
   void on_update(tl_object_ptr<telegram_api::updateChatParticipantAdmin> update, bool /*force_apply*/);
   void on_update(tl_object_ptr<telegram_api::updateChatParticipantDelete> update, bool /*force_apply*/);
-  void on_update(tl_object_ptr<telegram_api::updateChatAdmins> update, bool /*force_apply*/);
+
+  void on_update(tl_object_ptr<telegram_api::updateChatDefaultBannedRights> update, bool /*force_apply*/);
 
   void on_update(tl_object_ptr<telegram_api::updateServiceNotification> update, bool force_apply);
 

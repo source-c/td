@@ -16,13 +16,13 @@
 #include "td/utils/MovableValue.h"
 #include "td/utils/port/detail/ThreadIdGuard.h"
 #include "td/utils/port/thread_local.h"
+#include "td/utils/Slice.h"
 
 #include <tuple>
 #include <type_traits>
 #include <utility>
 
-#include <pthread.h>
-#include <sched.h>
+#include <sys/types.h>
 
 namespace td {
 namespace detail {
@@ -31,7 +31,10 @@ class ThreadPthread {
   ThreadPthread() = default;
   ThreadPthread(const ThreadPthread &other) = delete;
   ThreadPthread &operator=(const ThreadPthread &other) = delete;
-  ThreadPthread(ThreadPthread &&) = default;
+  ThreadPthread(ThreadPthread &&other) noexcept
+      : is_inited_(std::move(other.is_inited_))
+      , thread_(other.thread_) {
+  }
   ThreadPthread &operator=(ThreadPthread &&other) {
     join();
     is_inited_ = std::move(other.is_inited_);
@@ -45,29 +48,20 @@ class ThreadPthread {
       invoke_tuple(std::move(args));
       clear_thread_locals();
     });
-    pthread_create(&thread_, nullptr, run_thread, func.release());
+    do_pthread_create(&thread_, nullptr, run_thread, func.release());
     is_inited_ = true;
-  }
-  void join() {
-    if (is_inited_.get()) {
-      is_inited_ = false;
-      pthread_join(thread_, nullptr);
-    }
-  }
-
-  void detach() {
-    if (is_inited_.get()) {
-      is_inited_ = false;
-      pthread_detach(thread_);
-    }
   }
   ~ThreadPthread() {
     join();
   }
 
-  static unsigned hardware_concurrency() {
-    return 8;
-  }
+  void set_name(CSlice name);
+
+  void join();
+
+  void detach();
+
+  static unsigned hardware_concurrency();
 
   using id = pthread_t;
 
@@ -80,6 +74,8 @@ class ThreadPthread {
     return std::forward<T>(v);
   }
 
+  int do_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg);
+
   static void *run_thread(void *ptr) {
     ThreadIdGuard thread_id_guard;
     auto func = unique_ptr<Destructor>(static_cast<Destructor *>(ptr));
@@ -88,12 +84,8 @@ class ThreadPthread {
 };
 
 namespace this_thread_pthread {
-inline void yield() {
-  sched_yield();
-}
-inline ThreadPthread::id get_id() {
-  return pthread_self();
-}
+void yield();
+ThreadPthread::id get_id();
 }  // namespace this_thread_pthread
 }  // namespace detail
 }  // namespace td

@@ -16,6 +16,7 @@
 #include "td/utils/misc.h"
 #include "td/utils/port/Clocks.h"
 #include "td/utils/port/path.h"
+#include "td/utils/Status.h"
 #include "td/utils/Time.h"
 
 #include <algorithm>
@@ -52,11 +53,17 @@ void FileGcWorker::run_gc(const FileGcParameters &parameters, std::vector<FullFi
     immune_types[narrow_cast<size_t>(FileType::ProfilePhoto)] = true;
     immune_types[narrow_cast<size_t>(FileType::Thumbnail)] = true;
     immune_types[narrow_cast<size_t>(FileType::Wallpaper)] = true;
+    immune_types[narrow_cast<size_t>(FileType::Background)] = true;
   }
 
   if (!parameters.file_types.empty()) {
     std::fill(immune_types.begin(), immune_types.end(), true);
     for (auto file_type : parameters.file_types) {
+      if (file_type == FileType::Secure) {
+        immune_types[narrow_cast<size_t>(FileType::SecureRaw)] = false;
+      } else if (file_type == FileType::Background) {
+        immune_types[narrow_cast<size_t>(FileType::Wallpaper)] = false;
+      }
       immune_types[narrow_cast<size_t>(file_type)] = false;
     }
   }
@@ -91,6 +98,9 @@ void FileGcWorker::run_gc(const FileGcParameters &parameters, std::vector<FullFi
       std::remove_if(
           files.begin(), files.end(),
           [&](const FullFileInfo &info) {
+            if (token_) {
+              return false;
+            }
             if (immune_types[narrow_cast<size_t>(info.file_type)]) {
               type_immunity_ignored_cnt++;
               new_stats.add(FullFileInfo(info));
@@ -125,6 +135,9 @@ void FileGcWorker::run_gc(const FileGcParameters &parameters, std::vector<FullFi
             return false;
           }),
       files.end());
+  if (token_) {
+    return promise.set_error(Status::Error(500, "Request aborted"));
+  }
 
   // sort by max(atime, mtime)
   std::sort(files.begin(), files.end(), [](const auto &a, const auto &b) { return a.atime_nsec < b.atime_nsec; });
@@ -142,6 +155,9 @@ void FileGcWorker::run_gc(const FileGcParameters &parameters, std::vector<FullFi
 
   size_t pos = 0;
   while (pos < files.size() && (remove_count > 0 || remove_size > 0)) {
+    if (token_) {
+      return promise.set_error(Status::Error(500, "Request aborted"));
+    }
     if (remove_count > 0) {
       remove_by_count_cnt++;
     } else {

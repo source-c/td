@@ -27,7 +27,6 @@
 #include "td/utils/port/path.h"
 #include "td/utils/port/Stat.h"
 #include "td/utils/ScopeGuard.h"
-#include "td/utils/Slice.h"
 #include "td/utils/UInt.h"
 
 #include <tuple>
@@ -277,8 +276,8 @@ Status FileDownloader::check_net_query(NetQueryPtr &net_query) {
     auto error = net_query->move_as_error();
     if (FileReferenceManager::is_file_reference_error(error)) {
       VLOG(file_references) << "Receive " << error << " for being downloaded file";
-      error = Status::Error(error.code(), PSLICE() << error.message() << "#BASE64"
-                                                   << base64_encode(remote_.get_download_file_reference()));
+      error = Status::Error(error.code(),
+                            PSLICE() << error.message() << "#BASE64" << base64_encode(remote_.get_file_reference()));
     }
     return error;
   }
@@ -331,16 +330,15 @@ Result<size_t> FileDownloader::process_part(Part part, NetQueryPtr net_query) {
 
   // Encryption
   if (need_cdn_decrypt) {
-    UInt128 iv = as<UInt128>(cdn_encryption_iv_.c_str());
     CHECK(part.offset % 16 == 0);
     auto offset = narrow_cast<uint32>(part.offset / 16);
     offset =
         ((offset & 0xff) << 24) | ((offset & 0xff00) << 8) | ((offset & 0xff0000) >> 8) | ((offset & 0xff000000) >> 24);
-    as<uint32>(iv.raw + 12) = offset;
-    UInt256 key = as<UInt256>(cdn_encryption_key_.c_str());
 
     AesCtrState ctr_state;
-    ctr_state.init(key, iv);
+    string iv = cdn_encryption_iv_;
+    as<uint32>(&iv[12]) = offset;
+    ctr_state.init(cdn_encryption_key_, iv);
     ctr_state.decrypt(bytes.as_slice(), bytes.as_slice());
   }
   if (encryption_key_.is_secret()) {
@@ -350,7 +348,8 @@ Result<size_t> FileDownloader::process_part(Part part, NetQueryPtr net_query) {
     if (part.size % 16 != 0) {
       next_part_stop_ = true;
     }
-    aes_ige_decrypt(encryption_key_.key(), &encryption_key_.mutable_iv(), bytes.as_slice(), bytes.as_slice());
+    aes_ige_decrypt(as_slice(encryption_key_.key()), as_slice(encryption_key_.mutable_iv()), bytes.as_slice(),
+                    bytes.as_slice());
   }
 
   auto slice = bytes.as_slice().truncate(part.size);

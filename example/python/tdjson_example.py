@@ -94,7 +94,7 @@ while True:
             if auth_state['@type'] == 'authorizationStateClosed':
                 break
 
-            # set tdlib parameters
+            # set TDLib parameters
             # you MUST obtain your own api_id and api_hash at https://my.telegram.org
             # and use them in the setTdlibParameters call
             if auth_state['@type'] == 'authorizationStateWaitTdlibParameters':
@@ -110,23 +110,29 @@ while True:
                                                        'application_version': '1.0',
                                                        'enable_storage_optimizer': True}})
 
-            # set an encryption key for database to let know tdlib how to open the database
+            # set an encryption key for database to let know TDLib how to open the database
             if auth_state['@type'] == 'authorizationStateWaitEncryptionKey':
                 td_send({'@type': 'checkDatabaseEncryptionKey', 'key': 'my_key'})
 
-            # insert phone number for login
+            # enter phone number to log in
             if auth_state['@type'] == 'authorizationStateWaitPhoneNumber':
-                phone_number = input('Please insert your phone number: ')
+                phone_number = input('Please enter your phone number: ')
                 td_send({'@type': 'setAuthenticationPhoneNumber', 'phone_number': phone_number})
 
             # wait for authorization code
             if auth_state['@type'] == 'authorizationStateWaitCode':
-                code = input('Please insert the authentication code you received: ')
+                code = input('Please enter the authentication code you received: ')
                 td_send({'@type': 'checkAuthenticationCode', 'code': code})
+
+            # wait for first and last name for new users
+            if auth_state['@type'] == 'authorizationStateWaitRegistration':
+                first_name = input('Please enter your first name: ')
+                last_name = input('Please enter your last name: ')
+                td_send({'@type': 'registerUser', 'first_name': first_name, 'last_name': last_name})
 
             # wait for password if present
             if auth_state['@type'] == 'authorizationStateWaitPassword':
-                password = input('Please insert your password: ')
+                password = input('Please enter your password: ')
                 td_send({'@type': 'checkAuthenticationPassword', 'password': password})
 
         # handle an incoming update or an answer to a previously sent request

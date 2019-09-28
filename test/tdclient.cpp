@@ -11,6 +11,7 @@
 
 #include "td/telegram/Client.h"
 #include "td/telegram/ClientActor.h"
+#include "td/telegram/files/PartsManager.h"
 
 #include "td/telegram/td_api.h"
 
@@ -23,6 +24,7 @@
 #include "td/utils/misc.h"
 #include "td/utils/port/FileFd.h"
 #include "td/utils/port/path.h"
+#include "td/utils/port/thread.h"
 #include "td/utils/Random.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
@@ -140,7 +142,7 @@ class TestClient : public Actor {
 
   void start_up() override {
     rmrf(name_).ignore();
-    set_context(std::make_shared<td::ActorContext>());
+    auto old_context = set_context(std::make_shared<td::ActorContext>());
     set_tag(name_);
     LOG(INFO) << "START UP!";
 
@@ -211,10 +213,13 @@ class DoAuthentication : public Task {
         function = make_tl_object<td_api::checkDatabaseEncryptionKey>();
         break;
       case td_api::authorizationStateWaitPhoneNumber::ID:
-        function = make_tl_object<td_api::setAuthenticationPhoneNumber>(phone_, false, true);
+        function = make_tl_object<td_api::setAuthenticationPhoneNumber>(phone_, nullptr);
         break;
       case td_api::authorizationStateWaitCode::ID:
-        function = make_tl_object<td_api::checkAuthenticationCode>(code_, name_, "");
+        function = make_tl_object<td_api::checkAuthenticationCode>(code_);
+        break;
+      case td_api::authorizationStateWaitRegistration::ID:
+        function = make_tl_object<td_api::registerUser>(name_, "");
         break;
       case td_api::authorizationStateWaitTdlibParameters::ID: {
         auto parameters = td_api::make_object<td_api::tdlibParameters>();
@@ -866,6 +871,42 @@ TEST(Client, SimpleMulti) {
         break;
       }
     }
+  }
+}
+
+TEST(Client, Multi) {
+  std::vector<td::thread> threads;
+  for (int i = 0; i < 4; i++) {
+    threads.emplace_back([] {
+      for (int i = 0; i < 1000; i++) {
+        td::Client client;
+        client.send({3, td::make_tl_object<td::td_api::testSquareInt>(3)});
+        while (true) {
+          auto result = client.receive(10);
+          if (result.id == 3) {
+            break;
+          }
+        }
+      }
+    });
+  }
+
+  for (auto &thread : threads) {
+    thread.join();
+  }
+}
+
+TEST(PartsManager, hands) {
+  //Status init(int64 size, int64 expected_size, bool is_size_final, size_t part_size,
+  //const std::vector<int> &ready_parts, bool use_part_count_limit) TD_WARN_UNUSED_RESULT;
+  {
+    PartsManager pm;
+    pm.init(0, 100000, false, 10, {0, 1, 2}, false, true).ensure_error();
+    //pm.set_known_prefix(0, false).ensure();
+  }
+  {
+    PartsManager pm;
+    pm.init(1, 100000, true, 10, {0, 1, 2}, false, true).ensure_error();
   }
 }
 

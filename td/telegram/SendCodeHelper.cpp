@@ -9,17 +9,14 @@
 namespace td {
 
 void SendCodeHelper::on_sent_code(telegram_api::object_ptr<telegram_api::auth_sentCode> sent_code) {
-  phone_registered_ = (sent_code->flags_ & SENT_CODE_FLAG_IS_USER_REGISTERED) != 0;
   phone_code_hash_ = sent_code->phone_code_hash_;
   sent_code_info_ = get_authentication_code_info(std::move(sent_code->type_));
   next_code_info_ = get_authentication_code_info(std::move(sent_code->next_type_));
   next_code_timestamp_ = Timestamp::in((sent_code->flags_ & SENT_CODE_FLAG_HAS_TIMEOUT) != 0 ? sent_code->timeout_ : 0);
 }
 
-td_api::object_ptr<td_api::authorizationStateWaitCode> SendCodeHelper::get_authorization_state_wait_code(
-    const TermsOfService &terms_of_service) const {
-  return make_tl_object<td_api::authorizationStateWaitCode>(
-      phone_registered_, terms_of_service.get_terms_of_service_object(), get_authentication_code_info_object());
+td_api::object_ptr<td_api::authorizationStateWaitCode> SendCodeHelper::get_authorization_state_wait_code() const {
+  return make_tl_object<td_api::authorizationStateWaitCode>(get_authentication_code_info_object());
 }
 
 td_api::object_ptr<td_api::authenticationCodeInfo> SendCodeHelper::get_authentication_code_info_object() const {
@@ -39,52 +36,52 @@ Result<telegram_api::auth_resendCode> SendCodeHelper::resend_code() {
   return telegram_api::auth_resendCode(phone_number_, phone_code_hash_);
 }
 
-Result<telegram_api::auth_sendCode> SendCodeHelper::send_code(Slice phone_number, bool allow_flash_call,
-                                                              bool is_current_phone_number, int32 api_id,
-                                                              const string &api_hash) {
+telegram_api::object_ptr<telegram_api::codeSettings> SendCodeHelper::get_input_code_settings(const Settings &settings) {
+  int32 flags = 0;
+  string app_hash;
+  if (settings != nullptr) {
+    if (settings->allow_flash_call_) {
+      flags |= telegram_api::codeSettings::ALLOW_FLASHCALL_MASK;
+    }
+    if (settings->is_current_phone_number_) {
+      flags |= telegram_api::codeSettings::CURRENT_NUMBER_MASK;
+    }
+    if (settings->allow_sms_retriever_api_) {
+      flags |= telegram_api::codeSettings::APP_HASH_PERSISTENT_MASK;
+      flags |= telegram_api::codeSettings::APP_HASH_MASK;
+      app_hash = "ignored1234";
+    }
+  }
+  return telegram_api::make_object<telegram_api::codeSettings>(flags, false /*ignored*/, false /*ignored*/,
+                                                               false /*ignored*/, app_hash);
+}
+
+Result<telegram_api::auth_sendCode> SendCodeHelper::send_code(Slice phone_number, const Settings &settings,
+                                                              int32 api_id, const string &api_hash) {
   if (!phone_number_.empty()) {
     return Status::Error(8, "Can't change phone");
   }
   phone_number_ = phone_number.str();
-  int32 flags = 0;
-  if (allow_flash_call) {
-    flags |= AUTH_SEND_CODE_FLAG_ALLOW_FLASH_CALL;
-  }
-  return telegram_api::auth_sendCode(flags, false /*ignored*/, phone_number_, is_current_phone_number, api_id,
-                                     api_hash);
+  return telegram_api::auth_sendCode(phone_number_, api_id, api_hash, get_input_code_settings(settings));
 }
 
-Result<telegram_api::account_sendChangePhoneCode> SendCodeHelper::send_change_phone_code(Slice phone_number,
-                                                                                         bool allow_flash_call,
-                                                                                         bool is_current_phone_number) {
+telegram_api::account_sendChangePhoneCode SendCodeHelper::send_change_phone_code(Slice phone_number,
+                                                                                 const Settings &settings) {
   phone_number_ = phone_number.str();
-  int32 flags = 0;
-  if (allow_flash_call) {
-    flags |= AUTH_SEND_CODE_FLAG_ALLOW_FLASH_CALL;
-  }
-  return telegram_api::account_sendChangePhoneCode(flags, false /*ignored*/, phone_number_, is_current_phone_number);
+  return telegram_api::account_sendChangePhoneCode(phone_number_, get_input_code_settings(settings));
 }
 
-Result<telegram_api::account_sendVerifyPhoneCode> SendCodeHelper::send_verify_phone_code(const string &hash,
-                                                                                         Slice phone_number,
-                                                                                         bool allow_flash_call,
-                                                                                         bool is_current_phone_number) {
+telegram_api::account_sendVerifyPhoneCode SendCodeHelper::send_verify_phone_code(Slice phone_number,
+                                                                                 const Settings &settings) {
   phone_number_ = phone_number.str();
-  int32 flags = 0;
-  if (allow_flash_call) {
-    flags |= AUTH_SEND_CODE_FLAG_ALLOW_FLASH_CALL;
-  }
-  return telegram_api::account_sendVerifyPhoneCode(flags, false /*ignored*/, hash, is_current_phone_number);
+  return telegram_api::account_sendVerifyPhoneCode(phone_number_, get_input_code_settings(settings));
 }
 
-Result<telegram_api::account_sendConfirmPhoneCode> SendCodeHelper::send_confirm_phone_code(
-    Slice phone_number, bool allow_flash_call, bool is_current_phone_number) {
+telegram_api::account_sendConfirmPhoneCode SendCodeHelper::send_confirm_phone_code(const string &hash,
+                                                                                   Slice phone_number,
+                                                                                   const Settings &settings) {
   phone_number_ = phone_number.str();
-  int32 flags = 0;
-  if (allow_flash_call) {
-    flags |= AUTH_SEND_CODE_FLAG_ALLOW_FLASH_CALL;
-  }
-  return telegram_api::account_sendConfirmPhoneCode(flags, false /*ignored*/, phone_number_, is_current_phone_number);
+  return telegram_api::account_sendConfirmPhoneCode(hash, get_input_code_settings(settings));
 }
 
 SendCodeHelper::AuthenticationCodeInfo SendCodeHelper::get_authentication_code_info(
@@ -132,19 +129,19 @@ SendCodeHelper::AuthenticationCodeInfo SendCodeHelper::get_authentication_code_i
   }
 }
 
-tl_object_ptr<td_api::AuthenticationCodeType> SendCodeHelper::get_authentication_code_type_object(
+td_api::object_ptr<td_api::AuthenticationCodeType> SendCodeHelper::get_authentication_code_type_object(
     const AuthenticationCodeInfo &authentication_code_info) {
   switch (authentication_code_info.type) {
     case AuthenticationCodeInfo::Type::None:
       return nullptr;
     case AuthenticationCodeInfo::Type::Message:
-      return make_tl_object<td_api::authenticationCodeTypeTelegramMessage>(authentication_code_info.length);
+      return td_api::make_object<td_api::authenticationCodeTypeTelegramMessage>(authentication_code_info.length);
     case AuthenticationCodeInfo::Type::Sms:
-      return make_tl_object<td_api::authenticationCodeTypeSms>(authentication_code_info.length);
+      return td_api::make_object<td_api::authenticationCodeTypeSms>(authentication_code_info.length);
     case AuthenticationCodeInfo::Type::Call:
-      return make_tl_object<td_api::authenticationCodeTypeCall>(authentication_code_info.length);
+      return td_api::make_object<td_api::authenticationCodeTypeCall>(authentication_code_info.length);
     case AuthenticationCodeInfo::Type::FlashCall:
-      return make_tl_object<td_api::authenticationCodeTypeFlashCall>(authentication_code_info.pattern);
+      return td_api::make_object<td_api::authenticationCodeTypeFlashCall>(authentication_code_info.pattern);
     default:
       UNREACHABLE();
       return nullptr;

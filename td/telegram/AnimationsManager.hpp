@@ -26,6 +26,7 @@ void AnimationsManager::store_animation(FileId file_id, StorerT &storer) const {
   store(animation->dimensions, storer);
   store(animation->file_name, storer);
   store(animation->mime_type, storer);
+  store(animation->minithumbnail, storer);
   store(animation->thumbnail, storer);
   store(file_id, storer);
 }
@@ -39,8 +40,14 @@ FileId AnimationsManager::parse_animation(ParserT &parser) {
   parse(animation->dimensions, parser);
   parse(animation->file_name, parser);
   parse(animation->mime_type, parser);
+  if (parser.version() >= static_cast<int32>(Version::SupportMinithumbnails)) {
+    parse(animation->minithumbnail, parser);
+  }
   parse(animation->thumbnail, parser);
   parse(animation->file_id, parser);
+  if (parser.get_error() != nullptr || !animation->file_id.is_valid()) {
+    return FileId();
+  }
   return on_get_animation(std::move(animation), false);
 }
 

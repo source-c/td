@@ -120,7 +120,10 @@ class MultiTd : public Actor {
     string name = "Td";
     class TdActorContext : public ActorContext {
      public:
-      TdActorContext(std::string tag) : tag_(std::move(tag)) {
+      explicit TdActorContext(std::string tag) : tag_(std::move(tag)) {
+      }
+      int32 get_id() const override {
+        return 0x172ae58d;
       }
       std::string tag_;
     };
@@ -177,7 +180,6 @@ class MultiImpl {
     scheduler_thread_ = thread([concurrent_scheduler = concurrent_scheduler_] {
       while (concurrent_scheduler->run_main(10)) {
       }
-      concurrent_scheduler->finish();
     });
   }
   MultiImpl(const MultiImpl &) = delete;
@@ -212,6 +214,7 @@ class MultiImpl {
       Scheduler::instance()->finish();
     }
     scheduler_thread_.join();
+    concurrent_scheduler_->finish();
   }
 
  private:

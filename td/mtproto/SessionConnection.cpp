@@ -182,6 +182,10 @@ class OnPacket {
   }
 };
 
+unique_ptr<RawConnection> SessionConnection::move_as_raw_connection() {
+  return std::move(raw_connection_);
+}
+
 /*** SessionConnection ***/
 BufferSlice SessionConnection::as_buffer_slice(Slice packet) {
   return current_buffer_slice_->from_slice(packet);
@@ -279,7 +283,7 @@ Status SessionConnection::on_packet(const MsgInfo &info, const mtproto_api::dest
 }
 
 Status SessionConnection::on_destroy_auth_key(const mtproto_api::DestroyAuthKeyRes &destroy_auth_key) {
-  CHECK(need_destroy_auth_key_);
+  LOG_CHECK(need_destroy_auth_key_) << static_cast<int32>(mode_);
   LOG(INFO) << to_string(destroy_auth_key);
   return callback_->on_destroy_auth_key();
 }
@@ -429,7 +433,7 @@ Status SessionConnection::on_packet(const MsgInfo &info, const mtproto_api::futu
 
 Status SessionConnection::on_msgs_state_info(const std::vector<int64> &ids, Slice info) {
   if (ids.size() != info.size()) {
-    return Status::Error(PSLICE() << tag("ids.size()", ids.size()) << "!=" << tag("info.size()", info.size()));
+    return Status::Error(PSLICE() << tag("ids.size()", ids.size()) << " != " << tag("info.size()", info.size()));
   }
   size_t i = 0;
   for (auto id : ids) {
@@ -475,6 +479,7 @@ Status SessionConnection::on_slice_packet(const MsgInfo &info, Slice packet) {
   }
   TlParser parser(packet);
   tl_object_ptr<mtproto_api::Object> object = mtproto_api::Object::fetch(parser);
+  parser.fetch_end();
   if (parser.get_error()) {
     // msg_container is not real tl object
     if (packet.size() >= 4 && as<int32>(packet.begin()) == mtproto_api::msg_container::ID) {
@@ -731,8 +736,6 @@ void SessionConnection::set_online(bool online_flag, bool is_main) {
 
 void SessionConnection::do_close(Status status) {
   state_ = Closed;
-  callback_->on_before_close();
-  raw_connection_->close();
   // NB: this could be destroyed after on_closed
   callback_->on_closed(std::move(status));
 }
@@ -978,6 +981,7 @@ void SessionConnection::send_before(double tm) {
 }
 
 Status SessionConnection::do_flush() {
+  CHECK(raw_connection_);
   CHECK(state_ != Closed);
   if (state_ == Init) {
     TRY_STATUS(init());

@@ -6,7 +6,7 @@
 //
 #pragma once
 
-#include "td/telegram/net/ConnectionCreator.h"
+#include "td/telegram/net/Proxy.h"
 
 #include "td/utils/common.h"
 #include "td/utils/Slice.h"
@@ -23,6 +23,7 @@ class MtprotoHeader {
     string application_version;
     string language_pack;
     string language_code;
+    string parameters;
     bool is_emulator = false;
     Proxy proxy;
   };
@@ -34,6 +35,16 @@ class MtprotoHeader {
   void set_proxy(Proxy proxy) {
     options_.proxy = proxy;
     default_header_ = gen_header(options_, false);
+  }
+
+  bool set_parameters(string parameters) {
+    if (options_.parameters == parameters) {
+      return false;
+    }
+
+    options_.parameters = parameters;
+    default_header_ = gen_header(options_, false);
+    return true;
   }
 
   bool set_is_emulator(bool is_emulator) {
@@ -71,6 +82,10 @@ class MtprotoHeader {
   }
   Slice get_anonymous_header() const {
     return anonymous_header_;
+  }
+
+  string get_system_language_code() const {
+    return options_.system_language_code;
   }
 
  private:

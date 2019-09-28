@@ -8,7 +8,11 @@
 #include "td/utils/base64.h"
 #include "td/utils/BigNum.h"
 #include "td/utils/bits.h"
+#include "td/utils/CancellationToken.h"
 #include "td/utils/common.h"
+#include "td/utils/Hash.h"
+#include "td/utils/HashMap.h"
+#include "td/utils/HashSet.h"
 #include "td/utils/HttpUrl.h"
 #include "td/utils/invoke.h"
 #include "td/utils/logging.h"
@@ -23,9 +27,12 @@
 #include "td/utils/port/wstring_convert.h"
 #include "td/utils/Random.h"
 #include "td/utils/Slice.h"
+#include "td/utils/Status.h"
 #include "td/utils/StringBuilder.h"
 #include "td/utils/tests.h"
+#include "td/utils/Time.h"
 #include "td/utils/translit.h"
+#include "td/utils/uint128.h"
 #include "td/utils/unicode.h"
 #include "td/utils/utf8.h"
 
@@ -33,7 +40,12 @@
 #include <clocale>
 #include <limits>
 #include <locale>
+#include <unordered_map>
 #include <utility>
+
+#if TD_HAVE_ABSL
+#include <absl/container/flat_hash_map.h>
+#endif
 
 using namespace td;
 
@@ -442,6 +454,29 @@ TEST(BigNum, from_decimal) {
   ASSERT_TRUE(BigNum::from_decimal("999999999999999999999999999999999999999999999999").is_ok());
 }
 
+TEST(BigNum, from_binary) {
+  ASSERT_STREQ(BigNum::from_binary("").to_decimal(), "0");
+  ASSERT_STREQ(BigNum::from_binary("a").to_decimal(), "97");
+  ASSERT_STREQ(BigNum::from_binary("\x00\xff").to_decimal(), "255");
+  ASSERT_STREQ(BigNum::from_binary("\x00\x01\x00\x00").to_decimal(), "65536");
+  ASSERT_STREQ(BigNum::from_le_binary("").to_decimal(), "0");
+  ASSERT_STREQ(BigNum::from_le_binary("a").to_decimal(), "97");
+  ASSERT_STREQ(BigNum::from_le_binary("\x00\xff").to_decimal(), "65280");
+  ASSERT_STREQ(BigNum::from_le_binary("\x00\x01\x00\x00").to_decimal(), "256");
+  ASSERT_STREQ(BigNum::from_decimal("255").move_as_ok().to_binary(), "\xff");
+  ASSERT_STREQ(BigNum::from_decimal("255").move_as_ok().to_le_binary(), "\xff");
+  ASSERT_STREQ(BigNum::from_decimal("255").move_as_ok().to_binary(2), "\x00\xff");
+  ASSERT_STREQ(BigNum::from_decimal("255").move_as_ok().to_le_binary(2), "\xff\x00");
+  ASSERT_STREQ(BigNum::from_decimal("65280").move_as_ok().to_binary(), "\xff\x00");
+  ASSERT_STREQ(BigNum::from_decimal("65280").move_as_ok().to_le_binary(), "\x00\xff");
+  ASSERT_STREQ(BigNum::from_decimal("65280").move_as_ok().to_binary(2), "\xff\x00");
+  ASSERT_STREQ(BigNum::from_decimal("65280").move_as_ok().to_le_binary(2), "\x00\xff");
+  ASSERT_STREQ(BigNum::from_decimal("65536").move_as_ok().to_binary(), "\x01\x00\x00");
+  ASSERT_STREQ(BigNum::from_decimal("65536").move_as_ok().to_le_binary(), "\x00\x00\x01");
+  ASSERT_STREQ(BigNum::from_decimal("65536").move_as_ok().to_binary(4), "\x00\x01\x00\x00");
+  ASSERT_STREQ(BigNum::from_decimal("65536").move_as_ok().to_le_binary(4), "\x00\x00\x01\x00");
+}
+
 static void test_get_ipv4(uint32 ip) {
   td::IPAddress ip_address;
   ip_address.init_ipv4_port(td::IPAddress::ipv4_to_str(ip), 80).ensure();
@@ -595,8 +630,6 @@ TEST(Misc, As) {
   ASSERT_EQ(123, as<int>((const char *)buf));
   ASSERT_EQ(123, as<int>((char *)buf));
   char buf2[100];
-  //auto x = as<int>(buf2);
-  //x = 44342;  //CE
   as<int>(buf2) = as<int>(buf);
   ASSERT_EQ(123, as<int>((const char *)buf2));
   ASSERT_EQ(123, as<int>((char *)buf2));
@@ -654,11 +687,264 @@ TEST(Misc, Bits) {
     ASSERT_EQ(i, count_trailing_zeroes_non_zero64(1ull << i));
   }
 
-  ASSERT_EQ(0x12345678u, bswap32(0x78563412u));
-  ASSERT_EQ(0x12345678abcdef67ull, bswap64(0x67efcdab78563412ull));
+  ASSERT_EQ(0x12345678u, td::bswap32(0x78563412u));
+  ASSERT_EQ(0x12345678abcdef67ull, td::bswap64(0x67efcdab78563412ull));
 
   ASSERT_EQ(0, count_bits32(0));
   ASSERT_EQ(0, count_bits64(0));
   ASSERT_EQ(4, count_bits32((1u << 31) | 7));
   ASSERT_EQ(4, count_bits64((1ull << 63) | 7));
+}
+
+#if !TD_THREAD_UNSUPPORTED
+TEST(Misc, Time) {
+  Stage run;
+  Stage check;
+  Stage finish;
+
+  size_t threads_n = 3;
+  std::vector<thread> threads;
+  std::vector<std::atomic<double>> ts(threads_n);
+  for (size_t i = 0; i < threads_n; i++) {
+    threads.emplace_back([&, thread_id = i] {
+      for (uint64 round = 1; round < 100000; round++) {
+        ts[thread_id] = 0;
+        run.wait(round * threads_n);
+        ts[thread_id] = Time::now();
+        check.wait(round * threads_n);
+        for (auto &ts_ref : ts) {
+          auto other_ts = ts_ref.load();
+          if (other_ts != 0) {
+            ASSERT_TRUE(other_ts <= Time::now_cached());
+          }
+        }
+
+        finish.wait(round * threads_n);
+      }
+    });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+}
+#endif
+
+TEST(Misc, uint128) {
+  std::vector<uint64> parts = {0,
+                               1,
+                               2000,
+                               2001,
+                               std::numeric_limits<uint64>::max(),
+                               std::numeric_limits<uint64>::max() - 1,
+                               std::numeric_limits<uint32>::max(),
+                               static_cast<uint64>(std::numeric_limits<uint32>::max()) + 1};
+  std::vector<int64> signed_parts = {0,
+                                     1,
+                                     2000,
+                                     2001,
+                                     -1,
+                                     -2000,
+                                     -2001,
+                                     std::numeric_limits<int64>::max(),
+                                     std::numeric_limits<int64>::max() - 1,
+                                     std::numeric_limits<int64>::min(),
+                                     std::numeric_limits<int64>::min() + 1,
+                                     std::numeric_limits<int32>::max(),
+                                     static_cast<int64>(std::numeric_limits<int32>::max()) + 1,
+                                     std::numeric_limits<int32>::max() - 1,
+                                     std::numeric_limits<int32>::min(),
+                                     std::numeric_limits<int32>::min() + 1,
+                                     static_cast<int64>(std::numeric_limits<int32>::min()) - 1};
+
+#if TD_HAVE_INT128
+  auto to_intrinsic = [](uint128_emulated num) { return uint128_intrinsic(num.hi(), num.lo()); };
+  auto eq = [](uint128_emulated a, uint128_intrinsic b) { return a.hi() == b.hi() && a.lo() == b.lo(); };
+  auto ensure_eq = [&](uint128_emulated a, uint128_intrinsic b) {
+    if (!eq(a, b)) {
+      LOG(FATAL) << "[" << a.hi() << ";" << a.lo() << "] vs [" << b.hi() << ";" << b.lo() << "]";
+    }
+  };
+#endif
+
+  std::vector<uint128_emulated> nums;
+  for (auto hi : parts) {
+    for (auto lo : parts) {
+      auto a = uint128_emulated(hi, lo);
+#if TD_HAVE_INT128
+      auto ia = uint128_intrinsic(hi, lo);
+      ensure_eq(a, ia);
+#endif
+      nums.push_back(a);
+      nums.pop_back();
+      nums.push_back({hi, lo});
+    }
+  }
+
+#if TD_HAVE_INT128
+  for (auto a : nums) {
+    auto ia = to_intrinsic(a);
+    ensure_eq(a, ia);
+    CHECK(a.is_zero() == ia.is_zero());
+    for (int i = 0; i <= 130; i++) {
+      ensure_eq(a.shl(i), ia.shl(i));
+      ensure_eq(a.shr(i), ia.shr(i));
+    }
+    for (auto b : parts) {
+      ensure_eq(a.mult(b), ia.mult(b));
+    }
+    for (auto b : signed_parts) {
+      ensure_eq(a.mult_signed(b), ia.mult_signed(b));
+      if (b == 0) {
+        continue;
+      }
+      int64 q, r;
+      a.divmod_signed(b, &q, &r);
+      int64 iq, ir;
+      ia.divmod_signed(b, &iq, &ir);
+      ASSERT_EQ(q, iq);
+      ASSERT_EQ(r, ir);
+    }
+    for (auto b : nums) {
+      auto ib = to_intrinsic(b);
+      //LOG(ERROR) << ia.hi() << ";" << ia.lo() << " " << ib.hi() << ";" << ib.lo();
+      ensure_eq(a.mult(b), ia.mult(ib));
+      ensure_eq(a.add(b), ia.add(ib));
+      ensure_eq(a.sub(b), ia.sub(ib));
+      if (!b.is_zero()) {
+        ensure_eq(a.div(b), ia.div(ib));
+        ensure_eq(a.mod(b), ia.mod(ib));
+      }
+    }
+  }
+
+  for (auto signed_part : signed_parts) {
+    auto a = uint128_emulated::from_signed(signed_part);
+    auto ia = uint128_intrinsic::from_signed(signed_part);
+    ensure_eq(a, ia);
+  }
+#endif
+}
+
+template <template <class T> class HashT, class ValueT>
+Status test_hash(const std::vector<ValueT> &values) {
+  for (size_t i = 0; i < values.size(); i++) {
+    for (size_t j = i; j < values.size(); j++) {
+      auto &a = values[i];
+      auto &b = values[j];
+      auto a_hash = HashT<ValueT>()(a);
+      auto b_hash = HashT<ValueT>()(b);
+      if (a == b) {
+        if (a_hash != b_hash) {
+          return Status::Error("Hash differs for same values");
+        }
+      } else {
+        if (a_hash == b_hash) {
+          return Status::Error("Hash is the same for different values");
+        }
+      }
+    }
+  }
+  return Status::OK();
+}
+
+class BadValue {
+ public:
+  explicit BadValue(size_t value) : value_(value) {
+  }
+
+  template <class H>
+  friend H AbslHashValue(H hasher, const BadValue &value) {
+    return hasher;
+  }
+  bool operator==(const BadValue &other) const {
+    return value_ == other.value_;
+  }
+
+ private:
+  size_t value_;
+};
+
+class ValueA {
+ public:
+  explicit ValueA(size_t value) : value_(value) {
+  }
+  template <class H>
+  friend H AbslHashValue(H hasher, ValueA value) {
+    return H::combine(std::move(hasher), value.value_);
+  }
+  bool operator==(const ValueA &other) const {
+    return value_ == other.value_;
+  }
+
+ private:
+  size_t value_;
+};
+
+class ValueB {
+ public:
+  explicit ValueB(size_t value) : value_(value) {
+  }
+
+  template <class H>
+  friend H AbslHashValue(H hasher, ValueB value) {
+    return H::combine(std::move(hasher), value.value_);
+  }
+  bool operator==(const ValueB &other) const {
+    return value_ == other.value_;
+  }
+
+ private:
+  size_t value_;
+};
+
+template <template <class T> class HashT>
+static void test_hash() {
+  // Just check that the following compiles
+  AbslHashValue(Hasher(), ValueA{1});
+  HashT<ValueA>()(ValueA{1});
+  std::unordered_map<ValueA, int, HashT<ValueA>> s;
+  s[ValueA{1}] = 1;
+  HashMap<ValueA, int> su;
+  su[ValueA{1}] = 1;
+  HashSet<ValueA> su2;
+  su2.insert(ValueA{1});
+#if TD_HAVE_ABSL
+  std::unordered_map<ValueA, int, absl::Hash<ValueA>> x;
+  absl::flat_hash_map<ValueA, int, HashT<ValueA>> sa;
+  sa[ValueA{1}] = 1;
+#endif
+
+  test_hash<HashT, size_t>({1, 2, 3, 4, 5}).ensure();
+  test_hash<HashT, BadValue>({BadValue{1}, BadValue{2}}).ensure_error();
+  test_hash<HashT, ValueA>({ValueA{1}, ValueA{2}}).ensure();
+  test_hash<HashT, ValueB>({ValueB{1}, ValueB{2}}).ensure();
+  test_hash<HashT, std::pair<int, int>>({{1, 1}, {1, 2}}).ensure();
+  // FIXME: use some better hash
+  //test_hash<HashT, std::pair<int, int>>({{1, 1}, {1, 2}, {2, 1}, {2, 2}}).ensure();
+}
+
+TEST(Misc, Hasher) {
+  test_hash<TdHash>();
+#if TD_HAVE_ABSL
+  test_hash<AbslHash>();
+#endif
+}
+TEST(Misc, CancellationToken) {
+  CancellationTokenSource source;
+  source.cancel();
+  auto token1 = source.get_cancellation_token();
+  auto token2 = source.get_cancellation_token();
+  CHECK(!token1);
+  source.cancel();
+  CHECK(token1);
+  CHECK(token2);
+  auto token3 = source.get_cancellation_token();
+  CHECK(!token3);
+  source.cancel();
+  CHECK(token3);
+
+  auto token4 = source.get_cancellation_token();
+  CHECK(!token4);
+  source = CancellationTokenSource{};
+  CHECK(token4);
 }

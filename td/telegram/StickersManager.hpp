@@ -30,6 +30,7 @@ void StickersManager::store_sticker(FileId file_id, bool in_sticker_set, StorerT
   STORE_FLAG(sticker->is_mask);
   STORE_FLAG(has_sticker_set_access_hash);
   STORE_FLAG(in_sticker_set);
+  STORE_FLAG(sticker->is_animated);
   END_STORE_FLAGS();
   if (!in_sticker_set) {
     store(sticker->set_id, storer);
@@ -41,8 +42,8 @@ void StickersManager::store_sticker(FileId file_id, bool in_sticker_set, StorerT
   }
   store(sticker->alt, storer);
   store(sticker->dimensions, storer);
-  store(sticker->message_thumbnail, storer);
-  store(sticker->sticker_thumbnail, storer);
+  store(sticker->s_thumbnail, storer);
+  store(sticker->m_thumbnail, storer);
   store(file_id, storer);
   if (sticker->is_mask) {
     store(sticker->point, storer);
@@ -54,6 +55,10 @@ void StickersManager::store_sticker(FileId file_id, bool in_sticker_set, StorerT
 
 template <class ParserT>
 FileId StickersManager::parse_sticker(bool in_sticker_set, ParserT &parser) {
+  if (parser.get_error() != nullptr) {
+    return FileId();
+  }
+
   auto sticker = make_unique<Sticker>();
   bool has_sticker_set_access_hash;
   bool in_sticker_set_stored;
@@ -61,11 +66,20 @@ FileId StickersManager::parse_sticker(bool in_sticker_set, ParserT &parser) {
   PARSE_FLAG(sticker->is_mask);
   PARSE_FLAG(has_sticker_set_access_hash);
   PARSE_FLAG(in_sticker_set_stored);
+  PARSE_FLAG(sticker->is_animated);
   END_PARSE_FLAGS();
-  LOG_CHECK(in_sticker_set_stored == in_sticker_set)
-      << in_sticker_set << " " << in_sticker_set_stored << " " << parser.version() << " " << sticker->is_mask << " "
-      << has_sticker_set_access_hash << " "
-      << format::as_hex_dump<4>(parser.template fetch_string_raw<Slice>(parser.get_left_len()));
+  if (in_sticker_set_stored != in_sticker_set) {
+    Slice data = parser.template fetch_string_raw<Slice>(parser.get_left_len());
+    for (auto c : data) {
+      if (c != '\0') {
+        LOG_CHECK(in_sticker_set_stored == in_sticker_set)
+            << in_sticker_set << " " << in_sticker_set_stored << " " << parser.version() << " " << sticker->is_mask
+            << " " << has_sticker_set_access_hash << " " << format::as_hex_dump<4>(data);
+      }
+    }
+    parser.set_error("Zero sticker set is stored in the database");
+    return FileId();
+  }
   if (!in_sticker_set) {
     parse(sticker->set_id, parser);
     if (has_sticker_set_access_hash) {
@@ -79,14 +93,20 @@ FileId StickersManager::parse_sticker(bool in_sticker_set, ParserT &parser) {
   }
   parse(sticker->alt, parser);
   parse(sticker->dimensions, parser);
-  parse(sticker->message_thumbnail, parser);
-  parse(sticker->sticker_thumbnail, parser);
+  PhotoSize thumbnail;
+  parse(thumbnail, parser);
+  add_sticker_thumbnail(sticker.get(), thumbnail);
+  parse(thumbnail, parser);
+  add_sticker_thumbnail(sticker.get(), thumbnail);
   parse(sticker->file_id, parser);
   if (sticker->is_mask) {
     parse(sticker->point, parser);
     parse(sticker->x_shift, parser);
     parse(sticker->y_shift, parser);
     parse(sticker->scale, parser);
+  }
+  if (parser.get_error() != nullptr || !sticker->file_id.is_valid()) {
+    return FileId();
   }
   return on_get_sticker(std::move(sticker), false);  // data in the database is always outdated
 }
@@ -98,6 +118,7 @@ void StickersManager::store_sticker_set(const StickerSet *sticker_set, bool with
   bool was_loaded = sticker_set->was_loaded && is_full;
   bool is_loaded = sticker_set->is_loaded && is_full;
   bool has_expires_at = !sticker_set->is_installed && sticker_set->expires_at != 0;
+  bool has_thumbnail = sticker_set->thumbnail.file_id.is_valid();
   BEGIN_STORE_FLAGS();
   STORE_FLAG(sticker_set->is_inited);
   STORE_FLAG(was_loaded);
@@ -108,6 +129,9 @@ void StickersManager::store_sticker_set(const StickerSet *sticker_set, bool with
   STORE_FLAG(sticker_set->is_masks);
   STORE_FLAG(sticker_set->is_viewed);
   STORE_FLAG(has_expires_at);
+  STORE_FLAG(has_thumbnail);
+  STORE_FLAG(sticker_set->is_thumbnail_reloaded);
+  STORE_FLAG(sticker_set->is_animated);
   END_STORE_FLAGS();
   store(sticker_set->id, storer);
   store(sticker_set->access_hash, storer);
@@ -118,6 +142,9 @@ void StickersManager::store_sticker_set(const StickerSet *sticker_set, bool with
     store(sticker_set->hash, storer);
     if (has_expires_at) {
       store(sticker_set->expires_at, storer);
+    }
+    if (has_thumbnail) {
+      store(sticker_set->thumbnail, storer);
     }
 
     uint32 stored_sticker_count = narrow_cast<uint32>(is_full ? sticker_set->sticker_ids.size() : stickers_limit);
@@ -147,7 +174,9 @@ void StickersManager::parse_sticker_set(StickerSet *sticker_set, ParserT &parser
   bool is_archived;
   bool is_official;
   bool is_masks;
+  bool is_animated;
   bool has_expires_at;
+  bool has_thumbnail;
   BEGIN_PARSE_FLAGS();
   PARSE_FLAG(sticker_set->is_inited);
   PARSE_FLAG(sticker_set->was_loaded);
@@ -158,6 +187,9 @@ void StickersManager::parse_sticker_set(StickerSet *sticker_set, ParserT &parser
   PARSE_FLAG(is_masks);
   PARSE_FLAG(sticker_set->is_viewed);
   PARSE_FLAG(has_expires_at);
+  PARSE_FLAG(has_thumbnail);
+  PARSE_FLAG(sticker_set->is_thumbnail_reloaded);
+  PARSE_FLAG(is_animated);
   END_PARSE_FLAGS();
   int64 sticker_set_id;
   int64 access_hash;
@@ -182,6 +214,9 @@ void StickersManager::parse_sticker_set(StickerSet *sticker_set, ParserT &parser
     if (has_expires_at) {
       parse(expires_at, parser);
     }
+    if (has_thumbnail) {
+      parse(sticker_set->thumbnail, parser);
+    }
     if (!was_inited) {
       sticker_set->title = std::move(title);
       sticker_set->short_name = std::move(short_name);
@@ -190,6 +225,7 @@ void StickersManager::parse_sticker_set(StickerSet *sticker_set, ParserT &parser
       sticker_set->expires_at = expires_at;
       sticker_set->is_official = is_official;
       sticker_set->is_masks = is_masks;
+      sticker_set->is_animated = is_animated;
 
       short_name_to_sticker_set_id_.emplace(clean_username(sticker_set->short_name), sticker_set_id);
       on_update_sticker_set(sticker_set, is_installed, is_archived, false, true);
@@ -204,6 +240,14 @@ void StickersManager::parse_sticker_set(StickerSet *sticker_set, ParserT &parser
       if (sticker_set->sticker_count != sticker_count || sticker_set->hash != hash) {
         sticker_set->is_loaded = false;
       }
+      if (sticker_set->is_animated != is_animated) {
+        LOG(ERROR) << "Sticker set " << sticker_set_id << " is_animated has changed from \"" << is_animated
+                   << "\" to \"" << sticker_set->is_animated << "\"";
+      }
+      if (sticker_set->is_masks != is_masks) {
+        LOG(ERROR) << "Sticker set " << sticker_set_id << " is_masks has changed from \"" << is_masks << "\" to \""
+                   << sticker_set->is_masks << "\"";
+      }
     }
 
     uint32 stored_sticker_count;
@@ -215,6 +259,9 @@ void StickersManager::parse_sticker_set(StickerSet *sticker_set, ParserT &parser
     }
     for (uint32 i = 0; i < stored_sticker_count; i++) {
       auto sticker_id = parse_sticker(true, parser);
+      if (parser.get_error() != nullptr) {
+        return;
+      }
       sticker_set->sticker_ids.push_back(sticker_id);
 
       Sticker *sticker = get_sticker(sticker_id);

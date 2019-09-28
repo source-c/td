@@ -175,6 +175,8 @@ vector<UserId> get_message_content_added_user_ids(const MessageContent *content)
 
 UserId get_message_content_deleted_user_id(const MessageContent *content);
 
+UserId get_message_content_game_bot_user_id(const MessageContent *content);
+
 int32 get_message_content_live_location_period(const MessageContent *content);
 
 bool get_message_content_poll_is_closed(const Td *td, const MessageContent *content);
@@ -211,7 +213,7 @@ unique_ptr<MessageContent> get_message_content(Td *td, FormattedText message_tex
                                                int32 *ttl);
 
 unique_ptr<MessageContent> dup_message_content(Td *td, DialogId dialog_id, const MessageContent *content,
-                                               bool for_forward);
+                                               bool for_forward, bool remove_caption = false);
 
 unique_ptr<MessageContent> get_action_message_content(Td *td, tl_object_ptr<telegram_api::MessageAction> &&action,
                                                       DialogId owner_dialog_id, MessageId reply_to_message_id);
@@ -225,7 +227,9 @@ const FormattedText *get_message_content_caption(const MessageContent *content);
 
 int32 get_message_content_duration(const MessageContent *content, const Td *td);
 
-FileId get_message_content_file_id(const MessageContent *content);
+FileId get_message_content_upload_file_id(const MessageContent *content);
+
+FileId get_message_content_any_file_id(const MessageContent *content);
 
 void update_message_content_file_id_remote(MessageContent *content, FileId file_id);
 

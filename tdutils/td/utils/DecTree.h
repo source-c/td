@@ -53,7 +53,7 @@ class DecTree {
       T->left_ = std::move(P.first);
       T->right_ = std::move(P.second);
       T->relax();
-      return std::move(T);
+      return T;
     }
     if (Compare()(key, Tree->key_)) {
       Tree->left_ = insert_node(std::move(Tree->left_), std::move(key), std::move(value), y);
@@ -184,6 +184,9 @@ class DecTree {
   }
   void remove(const KeyType &key) {
     root_ = remove_node(std::move(root_), key);
+  }
+  void reset() {
+    root_ = nullptr;
   }
   ValueType *get(const KeyType &key) {
     return get_node(root_, key);

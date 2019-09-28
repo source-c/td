@@ -61,17 +61,20 @@ async function initLocalForage() {
   localforage.defineDriver(memoryDriver);
 }
 
-async function loadTdlibWasm(onFS) {
+async function loadTdlibWasm(onFS, wasmUrl) {
   console.log('loadTdlibWasm');
   const Module = await import('./prebuilt/release/td_wasm.js');
   log.info('got td_wasm.js');
-  const td_wasm = td_wasm_release;
+  let td_wasm = td_wasm_release;
+  if (wasmUrl) {
+    td_wasm = wasmUrl;
+  }
   const module = Module.default({
     onRuntimeInitialized: () => {
       log.info('runtime intialized');
     },
     instantiateWasm: (imports, successCallback) => {
-      log.info('start instantiateWasm');
+      log.info('start instantiateWasm', td_wasm);
       const next = instance => {
         log.info('finish instantiateWasm');
         successCallback(instance);
@@ -99,7 +102,7 @@ async function loadTdlibAsmjs(onFS) {
   console.log('got td_asm.js');
   const fromFile = 'td_asmjs.js.mem';
   const toFile = td_asmjs_mem_release;
-  const module = Module({
+  const module = Module.default({
     onRuntimeInitialized: () => {
       console.log('runtime intialized');
     },
@@ -122,7 +125,7 @@ async function loadTdlibAsmjs(onFS) {
   return TdModule;
 }
 
-async function loadTdlib(mode, onFS) {
+async function loadTdlib(mode, onFS, wasmUrl) {
   const wasmSupported = (() => {
     try {
       if (
@@ -144,7 +147,7 @@ async function loadTdlib(mode, onFS) {
     if (mode === 'wasm') {
       log.error('WebAssembly is not supported, trying to use it anyway');
     } else {
-      log.warning('WebAssembly is not supported, trying to use asm.js');
+      log.warn('WebAssembly is not supported, trying to use asm.js');
       mode = 'asmjs';
     }
   }
@@ -152,7 +155,7 @@ async function loadTdlib(mode, onFS) {
   if (mode === 'asmjs') {
     return loadTdlibAsmjs(onFS);
   }
-  return loadTdlibWasm(onFS);
+  return loadTdlibWasm(onFS, wasmUrl);
 }
 
 class OutboundFileSystem {
@@ -195,16 +198,34 @@ class InboundFileSystem {
     const start = performance.now();
     try {
       const ifs = new InboundFileSystem();
+      ifs.pending = [];
+      ifs.pendingHasTimeout = false;
+      ifs.persistCount = 0;
+      ifs.persistSize = 0;
+      ifs.pendingI = 0;
+      ifs.inPersist = false;
+      ifs.totalCount = 0;
+
       ifs.root = root;
 
-      ifs.store = localforage.createInstance({
-        name: dbName,
-        driver: localForageDrivers
+      //ifs.store = localforage.createInstance({
+      //name: dbName,
+      //driver: localForageDrivers
+      //});
+      log.debug('IDB name: ' + dbName);
+      ifs.idb = new Promise((resolve, reject) => {
+        const request = indexedDB.open(dbName);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+        request.onupgradeneeded = () => {
+          request.result.createObjectStore('keyvaluepairs');
+        };
       });
 
       ifs.load_pids();
 
       const FS = await FS_promise;
+      await ifs.idb;
       ifs.FS = FS;
       ifs.FS.mkdir(root);
       const create_time = (performance.now() - start) / 1000;
@@ -218,7 +239,18 @@ class InboundFileSystem {
   async load_pids() {
     const keys_start = performance.now();
     log.debug('InboundFileSystem::create::keys start');
-    const keys = await this.store.keys();
+    //const keys = await this.store.keys();
+
+    let idb = await this.idb;
+    let read = idb
+      .transaction(['keyvaluepairs'], 'readonly')
+      .objectStore('keyvaluepairs');
+    const keys = await new Promise((resolve, reject) => {
+      const request = read.getAllKeys();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+
     const keys_time = (performance.now() - keys_start) / 1000;
     log.debug(
       'InboundFileSystem::create::keys ' + keys_time + ' ' + keys.length
@@ -240,9 +272,18 @@ class InboundFileSystem {
     }
   }
 
-  async persist(pid, path, arr) {
+  async doPersist(pid, path, arr, resolve, reject, write) {
+    this.persistCount++;
+    let size = arr.length;
+    this.persistSize += size;
     try {
-      await this.store.setItem(pid, new Blob([arr]));
+      //log.debug('persist.do start', pid, path, arr.length);
+      //await this.store.setItem(pid, new Blob([arr]));
+      await new Promise((resolve, reject) => {
+        const request = write.put(new Blob([arr]), pid);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
       if (this.pids) {
         this.pids.add(pid);
       }
@@ -250,12 +291,99 @@ class InboundFileSystem {
     } catch (e) {
       log.error('Failed persist ' + path + ' ', e);
     }
+    //log.debug('persist.do finish', pid, path, arr.length);
+    this.persistCount--;
+    this.persistSize -= size;
+    resolve();
+
+    this.tryFinishPersist();
   }
+
+  async flushPersist() {
+    if (this.inPersist) {
+      return;
+    }
+    log.debug('persist.flush');
+    this.inPersist = true;
+    let idb = await this.idb;
+    this.writeBegin = performance.now();
+    let write = idb
+      .transaction(['keyvaluepairs'], 'readwrite')
+      .objectStore('keyvaluepairs');
+    while (
+      this.pendingI < this.pending.length &&
+      this.persistCount < 20 &&
+      this.persistSize < 50 << 20
+    ) {
+      var q = this.pending[this.pendingI];
+      this.pending[this.pendingI] = null;
+      // TODO: add to transaction
+      this.doPersist(q.pid, q.path, q.arr, q.resolve, q.reject, write);
+      this.pendingI++;
+      this.totalCount++;
+    }
+    log.debug(
+      'persist.flush transaction cnt=' +
+        this.persistCount +
+        ', size=' +
+        this.persistSize
+    );
+    this.inPersist = false;
+    this.tryFinishPersist();
+  }
+
+  async tryFinishPersist() {
+    if (this.inPersist) {
+      return;
+    }
+    if (this.persistCount !== 0) {
+      return;
+    }
+    log.debug('persist.finish ' + (performance.now() - this.writeBegin) / 1000);
+    if (this.pendingI === this.pending.length) {
+      this.pending = [];
+      this.pendingHasTimeout = false;
+      this.pendingI = 0;
+      log.debug('persist.finish done');
+      return;
+    }
+    log.debug('persist.finish continue');
+    this.flushPersist();
+  }
+
+  async persist(pid, path, arr) {
+    if (!this.pendingHasTimeout) {
+      this.pendingHasTimeout = true;
+      log.debug('persist set timeout');
+      setTimeout(() => {
+        this.flushPersist();
+      }, 1);
+    }
+    await new Promise((resolve, reject) => {
+      this.pending.push({
+        pid: pid,
+        path: path,
+        arr: arr,
+        resolve: resolve,
+        reject: reject
+      });
+    });
+  }
+
   async unlink(pid) {
     log.debug('Unlink ' + pid);
     try {
       this.forget(pid);
-      await this.store.removeItem(pid);
+      //await this.store.removeItem(pid);
+      let idb = await this.idb;
+      await new Promise((resolve, reject) => {
+        let write = idb
+          .transaction(['keyvaluepairs'], 'readwrite')
+          .objectStore('keyvaluepairs');
+        const request = write.delete(pid);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
     } catch (e) {
       log.error('Failed unlink ' + pid + ' ', e);
     }
@@ -272,6 +400,7 @@ class DbFileSystem {
       dbfs.FS = FS;
       dbfs.syncfs_total_time = 0;
       dbfs.readOnly = readOnly;
+      dbfs.syncActive = 0;
       FS.mkdir(root);
       FS.mount(FS.filesystems.IDBFS, {}, root);
 
@@ -328,10 +457,15 @@ class DbFileSystem {
       log.error('Failed to init DbFileSystem: ', e);
     }
   }
-  async sync() {
+  async sync(force) {
     if (this.readOnly) {
       return;
     }
+    if (this.syncActive > 0 && !force) {
+      log.debug('SYNC: skip');
+      return;
+    }
+    this.syncActive++;
     const start = performance.now();
     await new Promise((resolve, reject) => {
       this.FS.syncfs(false, () => {
@@ -342,10 +476,11 @@ class DbFileSystem {
         resolve();
       });
     });
+    this.syncActive--;
   }
   async close() {
     clearInterval(this.syncfsInterval);
-    await this.sync();
+    await this.sync(true);
   }
   async destroy() {
     clearInterval(this.syncfsInterval);
@@ -481,7 +616,7 @@ class TdClient {
     }
 
     log.info('load TdModule');
-    this.TdModule = await loadTdlib(mode, this.onFS);
+    this.TdModule = await loadTdlib(mode, this.onFS, options.wasmUrl);
     log.info('got TdModule');
     this.td_functions = {
       td_create: this.TdModule.cwrap('td_create', 'number', []),
@@ -548,6 +683,14 @@ class TdClient {
     this.client = this.td_functions.td_create();
 
     this.savingFiles = new Map();
+    this.send({
+      '@type': 'setOption',
+      name: 'store_all_files_in_files_directory',
+      value: {
+        '@type': 'optionValueBoolean',
+        value: true
+      }
+    });
     this.send({
       '@type': 'setOption',
       name: 'language_pack_database_path',
@@ -640,13 +783,13 @@ class TdClient {
         '@type': 'error',
         '@extra': query['@extra'],
         code: 400,
-        message: e
+        message: e.toString()
       });
       return;
     }
     this.callback(
       {
-        '@type': 'FilePart',
+        '@type': 'filePart',
         '@extra': query['@extra'],
         data: res
       },

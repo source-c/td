@@ -9,12 +9,16 @@
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
 
+#include "td/mtproto/AuthData.h"
 #include "td/mtproto/crypto.h"
 #include "td/mtproto/DhHandshake.h"
 #include "td/mtproto/Handshake.h"
 #include "td/mtproto/HandshakeActor.h"
+#include "td/mtproto/Ping.h"
 #include "td/mtproto/PingConnection.h"
+#include "td/mtproto/ProxySecret.h"
 #include "td/mtproto/RawConnection.h"
+#include "td/mtproto/TlsInit.h"
 #include "td/mtproto/TransportType.h"
 
 #include "td/net/GetHostByNameActor.h"
@@ -24,14 +28,18 @@
 #include "td/telegram/ConfigManager.h"
 #include "td/telegram/net/DcId.h"
 #include "td/telegram/net/PublicRsaKeyShared.h"
+#include "td/telegram/net/Session.h"
 #include "td/telegram/NotificationManager.h"
 
 #include "td/utils/base64.h"
 #include "td/utils/common.h"
 #include "td/utils/logging.h"
+#include "td/utils/port/Clocks.h"
 #include "td/utils/port/IPAddress.h"
 #include "td/utils/port/SocketFd.h"
+#include "td/utils/Random.h"
 #include "td/utils/Status.h"
+#include "td/utils/Time.h"
 
 REGISTER_TESTS(mtproto);
 
@@ -113,6 +121,19 @@ TEST(Mtproto, GetHostByNameActor) {
   sched.finish();
 }
 
+TEST(Time, to_unix_time) {
+  ASSERT_EQ(0, HttpDate::to_unix_time(1970, 1, 1, 0, 0, 0).move_as_ok());
+  ASSERT_EQ(60 * 60 + 60 + 1, HttpDate::to_unix_time(1970, 1, 1, 1, 1, 1).move_as_ok());
+  ASSERT_EQ(24 * 60 * 60, HttpDate::to_unix_time(1970, 1, 2, 0, 0, 0).move_as_ok());
+  ASSERT_EQ(31 * 24 * 60 * 60, HttpDate::to_unix_time(1970, 2, 1, 0, 0, 0).move_as_ok());
+  ASSERT_EQ(365 * 24 * 60 * 60, HttpDate::to_unix_time(1971, 1, 1, 0, 0, 0).move_as_ok());
+  ASSERT_EQ(1562780559, HttpDate::to_unix_time(2019, 7, 10, 17, 42, 39).move_as_ok());
+}
+
+TEST(Time, parse_http_date) {
+  ASSERT_EQ(784887151, HttpDate::parse_http_date("Tue, 15 Nov 1994 08:12:31 GMT").move_as_ok());
+}
+
 TEST(Mtproto, config) {
   ConcurrentScheduler sched;
   int threads_n = 0;
@@ -123,11 +144,17 @@ TEST(Mtproto, config) {
     auto guard = sched.get_main_guard();
 
     auto run = [&](auto &func, bool is_test) {
-      auto promise = PromiseCreator::lambda([&, num = cnt](Result<SimpleConfig> r_simple_config) {
-        if (r_simple_config.is_ok()) {
-          LOG(WARNING) << num << " " << to_string(r_simple_config.ok());
+      auto promise = PromiseCreator::lambda([&, num = cnt](Result<SimpleConfigResult> r_simple_config_result) {
+        if (r_simple_config_result.is_ok()) {
+          auto simple_config_result = r_simple_config_result.move_as_ok();
+          auto date = simple_config_result.r_http_date.is_ok()
+                          ? to_string(simple_config_result.r_http_date.ok())
+                          : (PSTRING() << simple_config_result.r_http_date.error());
+          auto config = simple_config_result.r_config.is_ok() ? to_string(simple_config_result.r_config.ok())
+                                                              : (PSTRING() << simple_config_result.r_config.error());
+          LOG(ERROR) << num << " " << date << " " << config;
         } else {
-          LOG(ERROR) << num << " " << r_simple_config.error();
+          LOG(ERROR) << num << " " << r_simple_config_result.error();
         }
         if (--cnt == 0) {
           Scheduler::instance()->finish();
@@ -170,9 +197,10 @@ class TestPingActor : public Actor {
   Status *result_;
 
   void start_up() override {
-    ping_connection_ = make_unique<mtproto::PingConnection>(
-        make_unique<mtproto::RawConnection>(SocketFd::open(ip_address_).move_as_ok(),
-                                            mtproto::TransportType{mtproto::TransportType::Tcp, 0, ""}, nullptr),
+    ping_connection_ = mtproto::PingConnection::create_req_pq(
+        make_unique<mtproto::RawConnection>(
+            SocketFd::open(ip_address_).move_as_ok(),
+            mtproto::TransportType{mtproto::TransportType::Tcp, 0, mtproto::ProxySecret()}, nullptr),
         3);
 
     Scheduler::subscribe(ping_connection_->get_poll_info().extract_pollable_fd(this));
@@ -181,7 +209,6 @@ class TestPingActor : public Actor {
   }
   void tear_down() override {
     Scheduler::unsubscribe_before_close(ping_connection_->get_poll_info().get_pollable_fd_ref());
-    ping_connection_->close();
     Scheduler::instance()->finish();
   }
 
@@ -282,12 +309,12 @@ class HandshakeTestActor : public Actor {
   }
   void loop() override {
     if (!wait_for_raw_connection_ && !raw_connection_) {
-      raw_connection_ =
-          make_unique<mtproto::RawConnection>(SocketFd::open(get_default_ip_address()).move_as_ok(),
-                                              mtproto::TransportType{mtproto::TransportType::Tcp, 0, ""}, nullptr);
+      raw_connection_ = make_unique<mtproto::RawConnection>(
+          SocketFd::open(get_default_ip_address()).move_as_ok(),
+          mtproto::TransportType{mtproto::TransportType::Tcp, 0, mtproto::ProxySecret()}, nullptr);
     }
     if (!wait_for_handshake_ && !handshake_) {
-      handshake_ = make_unique<mtproto::AuthKeyHandshake>(dc_id_, 0);
+      handshake_ = make_unique<mtproto::AuthKeyHandshake>(dc_id_, 3600);
     }
     if (raw_connection_ && handshake_) {
       if (wait_for_result_) {
@@ -462,4 +489,172 @@ TEST(Mtproto, notifications) {
     ASSERT_EQ(key_id, NotificationManager::get_push_receiver_id(push).ok());
     ASSERT_EQ(decrypted_payload, NotificationManager::decrypt_push(key_id, key, push).ok());
   }
+}
+
+class FastPingTestActor : public Actor {
+ public:
+  explicit FastPingTestActor(Status *result) : result_(result) {
+  }
+
+ private:
+  Status *result_;
+  unique_ptr<mtproto::RawConnection> connection_;
+  unique_ptr<mtproto::AuthKeyHandshake> handshake_;
+  ActorOwn<> fast_ping_;
+  int iteration_{0};
+
+  void start_up() override {
+    // Run handshake to create key and salt
+    auto raw_connection = make_unique<mtproto::RawConnection>(
+        SocketFd::open(get_default_ip_address()).move_as_ok(),
+        mtproto::TransportType{mtproto::TransportType::Tcp, 0, mtproto::ProxySecret()}, nullptr);
+    auto handshake = make_unique<mtproto::AuthKeyHandshake>(get_default_dc_id(), 60 * 100 /*temp*/);
+    create_actor<mtproto::HandshakeActor>(
+        "HandshakeActor", std::move(handshake), std::move(raw_connection), make_unique<HandshakeContext>(), 10.0,
+        PromiseCreator::lambda([self = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> raw_connection) {
+          send_closure(self, &FastPingTestActor::got_connection, std::move(raw_connection), 1);
+        }),
+        PromiseCreator::lambda([self = actor_id(this)](Result<unique_ptr<mtproto::AuthKeyHandshake>> handshake) {
+          send_closure(self, &FastPingTestActor::got_handshake, std::move(handshake), 1);
+        }))
+        .release();
+  }
+  void got_connection(Result<unique_ptr<mtproto::RawConnection>> r_raw_connection, int32 dummy) {
+    if (r_raw_connection.is_error()) {
+      *result_ = r_raw_connection.move_as_error();
+      return stop();
+    }
+    connection_ = r_raw_connection.move_as_ok();
+    loop();
+  }
+
+  void got_handshake(Result<unique_ptr<mtproto::AuthKeyHandshake>> r_handshake, int32 dummy) {
+    if (r_handshake.is_error()) {
+      *result_ = r_handshake.move_as_error();
+      return stop();
+    }
+    handshake_ = r_handshake.move_as_ok();
+    loop();
+  }
+
+  void got_raw_connection(Result<unique_ptr<mtproto::RawConnection>> r_connection) {
+    if (r_connection.is_error()) {
+      Scheduler::instance()->finish();
+      *result_ = r_connection.move_as_error();
+      return stop();
+    }
+    connection_ = r_connection.move_as_ok();
+    LOG(INFO) << "RTT: " << connection_->rtt_;
+    connection_->rtt_ = 0;
+    loop();
+  }
+
+  void loop() override {
+    if (handshake_ && connection_) {
+      LOG(INFO) << "Iteration " << iteration_;
+      if (iteration_ == 6) {
+        Scheduler::instance()->finish();
+        return stop();
+      }
+      unique_ptr<mtproto::AuthData> auth_data;
+      if (iteration_ % 2 == 0) {
+        auth_data = make_unique<mtproto::AuthData>();
+        auth_data->set_tmp_auth_key(handshake_->auth_key);
+        auth_data->set_server_time_difference(handshake_->server_time_diff);
+        auth_data->set_server_salt(handshake_->server_salt, Time::now());
+        auth_data->set_future_salts({mtproto::ServerSalt{0u, 1e20, 1e30}}, Time::now());
+        auth_data->set_use_pfs(true);
+        uint64 session_id = 0;
+        do {
+          Random::secure_bytes(reinterpret_cast<uint8 *>(&session_id), sizeof(session_id));
+        } while (session_id == 0);
+        auth_data->set_session_id(session_id);
+      }
+      iteration_++;
+      fast_ping_ = create_ping_actor(
+          "", std::move(connection_), std::move(auth_data),
+          PromiseCreator::lambda([self = actor_id(this)](Result<unique_ptr<mtproto::RawConnection>> r_raw_connection) {
+            send_closure(self, &FastPingTestActor::got_raw_connection, std::move(r_raw_connection));
+          }),
+          ActorShared<>());
+    }
+  }
+};
+
+class Mtproto_FastPing : public Test {
+ public:
+  using Test::Test;
+  bool step() final {
+    if (!is_inited_) {
+      sched_.init(0);
+      sched_.create_actor_unsafe<FastPingTestActor>(0, "FastPingTestActor", &result_).release();
+      sched_.start();
+      is_inited_ = true;
+    }
+
+    bool ret = sched_.run_main(10);
+    if (ret) {
+      return true;
+    }
+    sched_.finish();
+    if (result_.is_error()) {
+      LOG(ERROR) << result_;
+    }
+    return false;
+  }
+
+ private:
+  bool is_inited_ = false;
+  ConcurrentScheduler sched_;
+  Status result_;
+};
+RegisterTest<Mtproto_FastPing> mtproto_fastping("Mtproto_FastPing");
+
+TEST(Mtproto, Grease) {
+  std::string s(10000, '0');
+  mtproto::Grease::init(s);
+  for (auto c : s) {
+    CHECK((c & 0xF) == 0xA);
+  }
+  for (size_t i = 1; i < s.size(); i += 2) {
+    CHECK(s[i] != s[i - 1]);
+  }
+}
+
+TEST(Mtproto, TlsTransport) {
+  SET_VERBOSITY_LEVEL(VERBOSITY_NAME(ERROR));
+  ConcurrentScheduler sched;
+  int threads_n = 1;
+  sched.init(threads_n);
+  {
+    auto guard = sched.get_main_guard();
+    class RunTest : public Actor {
+      void start_up() override {
+        class Callback : public TransparentProxy::Callback {
+         public:
+          void set_result(Result<SocketFd> result) override {
+            CHECK(result.is_error() && result.error().message() == "Response hash mismatch");
+            Scheduler::instance()->finish();
+          }
+          void on_connected() override {
+          }
+        };
+
+        const std::string domain = "www.google.com";
+        IPAddress ip_address;
+        ip_address.init_host_port(domain, 443).ensure();
+        SocketFd fd = SocketFd::open(ip_address).move_as_ok();
+        create_actor<mtproto::TlsInit>("TlsInit", std::move(fd), domain, "0123456789secret", make_unique<Callback>(),
+                                       ActorShared<>(), Clocks::system() - Time::now())
+            .release();
+      }
+    };
+    create_actor<RunTest>("RunTest").release();
+  }
+
+  sched.start();
+  while (sched.run_main(10)) {
+    // empty
+  }
+  sched.finish();
 }

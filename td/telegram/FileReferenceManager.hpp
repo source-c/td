@@ -7,6 +7,7 @@
 #pragma once
 
 #include "td/telegram/AnimationsManager.h"
+#include "td/telegram/BackgroundManager.h"
 #include "td/telegram/ChannelId.h"
 #include "td/telegram/ChatId.h"
 #include "td/telegram/ContactsManager.h"
@@ -17,7 +18,6 @@
 #include "td/telegram/StickersManager.h"
 #include "td/telegram/Td.h"
 #include "td/telegram/UserId.h"
-#include "td/telegram/WallpaperManager.h"
 #include "td/telegram/WebPagesManager.h"
 
 #include "td/utils/common.h"
@@ -43,7 +43,11 @@ void FileReferenceManager::store_file_source(FileSourceId file_source_id, Storer
                           [&](const FileSourceWebPage &source) { td::store(source.url, storer); },
                           [&](const FileSourceSavedAnimations &source) {},
                           [&](const FileSourceRecentStickers &source) { td::store(source.is_attached, storer); },
-                          [&](const FileSourceFavoriteStickers &source) {}));
+                          [&](const FileSourceFavoriteStickers &source) {},
+                          [&](const FileSourceBackground &source) {
+                            td::store(source.background_id, storer);
+                            td::store(source.access_hash, storer);
+                          }));
 }
 
 template <class ParserT>
@@ -73,7 +77,7 @@ FileSourceId FileReferenceManager::parse_file_source(Td *td, ParserT &parser) {
       return td->contacts_manager_->get_channel_photo_file_source_id(channel_id);
     }
     case 4:
-      return td->wallpaper_manager_->get_wallpapers_file_source_id();
+      return FileSourceId();  // there is no way to repair old wallpapers
     case 5: {
       string url;
       td::parse(url, parser);
@@ -88,6 +92,13 @@ FileSourceId FileReferenceManager::parse_file_source(Td *td, ParserT &parser) {
     }
     case 8:
       return td->stickers_manager_->get_favorite_stickers_file_source_id();
+    case 9: {
+      BackgroundId background_id;
+      int64 access_hash;
+      td::parse(background_id, parser);
+      td::parse(access_hash, parser);
+      return td->background_manager_->get_background_file_source_id(background_id, access_hash);
+    }
     default:
       parser.set_error("Invalid type in FileSource");
       return FileSourceId();

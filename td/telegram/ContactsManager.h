@@ -98,6 +98,11 @@ class ContactsManager : public Actor {
   string get_channel_title(ChannelId channel_id) const;
   string get_secret_chat_title(SecretChatId secret_chat_id) const;
 
+  RestrictedRights get_user_default_permissions(UserId user_id) const;
+  RestrictedRights get_chat_default_permissions(ChatId chat_id) const;
+  RestrictedRights get_channel_default_permissions(ChannelId channel_id) const;
+  RestrictedRights get_secret_chat_default_permissions(SecretChatId secret_chat_id) const;
+
   bool is_update_about_username_change_received(UserId user_id) const;
 
   string get_user_username(UserId user_id) const;
@@ -161,16 +166,19 @@ class ContactsManager : public Actor {
 
   void on_delete_profile_photo(int64 profile_photo_id, Promise<Unit> promise);
 
-  void on_get_chat_participants(tl_object_ptr<telegram_api::ChatParticipants> &&participants);
+  void on_get_chat_participants(tl_object_ptr<telegram_api::ChatParticipants> &&participants, bool from_update);
   void on_update_chat_add_user(ChatId chat_id, UserId inviter_user_id, UserId user_id, int32 date, int32 version);
+  void on_update_chat_description(ChatId chat_id, string &&description);
   void on_update_chat_edit_administrator(ChatId chat_id, UserId user_id, bool is_administrator, int32 version);
   void on_update_chat_delete_user(ChatId chat_id, UserId user_id, int32 version);
-  void on_update_chat_everyone_is_administrator(ChatId chat_id, bool everyone_is_administrator, int32 version);
+  void on_update_chat_default_permissions(ChatId chat_id, RestrictedRights default_permissions, int32 version);
+  void on_update_chat_pinned_message(ChatId chat_id, MessageId pinned_message_id, int32 version);
 
   void on_update_channel_username(ChannelId channel_id, string &&username);
   void on_update_channel_description(ChannelId channel_id, string &&description);
   void on_update_channel_sticker_set(ChannelId channel_id, int64 sticker_set_id);
   void on_update_channel_is_all_history_available(ChannelId channel_id, bool is_all_history_available);
+  void on_update_channel_default_permissions(ChannelId channel_id, RestrictedRights default_permissions);
 
   void on_update_dialog_administrators(DialogId dialog_id, vector<UserId> administrator_user_ids, bool have_access);
 
@@ -283,13 +291,11 @@ class ContactsManager : public Actor {
 
   void set_username(const string &username, Promise<Unit> &&promise);
 
-  void toggle_chat_administrators(ChatId chat_id, bool everyone_is_administrator, Promise<Unit> &&promise);
+  void set_chat_description(ChatId chat_id, const string &description, Promise<Unit> &&promise);
 
   void set_channel_username(ChannelId channel_id, const string &username, Promise<Unit> &&promise);
 
   void set_channel_sticker_set(ChannelId channel_id, int64 sticker_set_id, Promise<Unit> &&promise);
-
-  void toggle_channel_invites(ChannelId channel_id, bool anyone_can_invite, Promise<Unit> &&promise);
 
   void toggle_channel_sign_messages(ChannelId channel_id, bool sign_messages, Promise<Unit> &&promise);
 
@@ -332,6 +338,8 @@ class ContactsManager : public Actor {
 
   vector<DialogId> get_created_public_dialogs(Promise<Unit> &&promise);
 
+  bool is_user_contact(UserId user_id) const;
+
   bool is_user_deleted(UserId user_id) const;
 
   bool is_user_bot(UserId user_id) const;
@@ -343,9 +351,12 @@ class ContactsManager : public Actor {
   bool have_min_user(UserId user_id) const;
   bool have_user_force(UserId user_id);
 
+  void reload_dialog_info(DialogId dialog_id, Promise<Unit> &&promise);
+
   static void send_get_me_query(Td *td, Promise<Unit> &&promise);
   UserId get_me(Promise<Unit> &&promise);
   bool get_user(UserId user_id, int left_tries, Promise<Unit> &&promise);
+  void reload_user(UserId user_id, Promise<Unit> &&promise);
   bool get_user_full(UserId user_id, Promise<Unit> &&promise);
 
   std::pair<int32, vector<const Photo *>> get_user_profile_photos(UserId user_id, int32 offset, int32 limit,
@@ -361,6 +372,7 @@ class ContactsManager : public Actor {
 
   bool get_chat_is_active(ChatId chat_id) const;
   DialogParticipantStatus get_chat_status(ChatId chat_id) const;
+  DialogParticipantStatus get_chat_permissions(ChatId chat_id) const;
   bool is_appointed_chat_administrator(ChatId chat_id) const;
   FileSourceId get_chat_photo_file_source_id(ChatId chat_id);
 
@@ -379,6 +391,7 @@ class ContactsManager : public Actor {
   ChannelType get_channel_type(ChannelId channel_id) const;
   int32 get_channel_date(ChannelId channel_id) const;
   DialogParticipantStatus get_channel_status(ChannelId channel_id) const;
+  DialogParticipantStatus get_channel_permissions(ChannelId channel_id) const;
   int32 get_channel_participant_count(ChannelId channel_id) const;
   bool get_channel_sign_messages(ChannelId channel_id) const;
   FileSourceId get_channel_photo_file_source_id(ChannelId channel_id);
@@ -483,6 +496,10 @@ class ContactsManager : public Actor {
 
     std::unordered_map<DialogId, int32, DialogIdHash> online_member_dialogs;  // id -> time
 
+    static constexpr uint32 CACHE_VERSION = 1;
+    uint32 cache_version = 0;
+
+    bool is_min_access_hash = false;
     bool is_received = false;
     bool is_verified = false;
     bool is_support = false;
@@ -492,14 +509,17 @@ class ContactsManager : public Actor {
     bool can_read_all_group_messages = true;
     bool is_inline_bot = false;
     bool need_location_bot = false;
+    bool is_scam = false;
 
     bool is_photo_inited = false;
-    bool is_repaired = false;
+
+    bool is_repaired = false;  // whether cached value is rechecked
 
     bool is_name_changed = true;
     bool is_username_changed = true;
     bool is_photo_changed = true;
     bool is_outbound_link_changed = true;
+    bool is_default_permissions_changed = true;
     bool is_changed = true;        // have new changes not sent to the database except changes visible to the client
     bool need_send_update = true;  // have new changes not sent to the client
     bool is_status_changed = true;
@@ -565,22 +585,25 @@ class ContactsManager : public Actor {
     int32 participant_count = 0;
     int32 date = 0;
     int32 version = -1;
+    int32 default_permissions_version = -1;
+    int32 pinned_message_version = -1;
     ChannelId migrated_to_channel_id;
 
-    bool left = false;
-    bool kicked = true;
+    DialogParticipantStatus status = DialogParticipantStatus::Banned(0);
+    RestrictedRights default_permissions{false, false, false, false, false, false, false, false, false, false, false};
 
-    bool is_creator = false;
-    bool is_administrator = false;
-    bool everyone_is_administrator = true;
-    bool can_edit = true;
+    static constexpr uint32 CACHE_VERSION = 1;
+    uint32 cache_version = 0;
 
     bool is_active = false;
 
     bool is_title_changed = true;
     bool is_photo_changed = true;
+    bool is_default_permissions_changed = true;
     bool is_changed = true;        // have new changes not sent to the database except changes visible to the client
     bool need_send_update = true;  // have new changes not sent to the client
+
+    bool is_repaired = false;  // whether cached value is rechecked
 
     bool is_saved = false;        // is current chat version being saved/is saved to the database
     bool is_being_saved = false;  // is current chat being saved to the database
@@ -598,6 +621,8 @@ class ContactsManager : public Actor {
     UserId creator_user_id;
     vector<DialogParticipant> participants;
 
+    string description;
+
     string invite_link;
 
     bool is_changed = true;
@@ -611,23 +636,30 @@ class ContactsManager : public Actor {
     string username;
     string restriction_reason;
     DialogParticipantStatus status = DialogParticipantStatus::Banned(0);
+    RestrictedRights default_permissions{false, false, false, false, false, false, false, false, false, false, false};
     int32 date = 0;
     int32 participant_count = 0;
 
-    bool anyone_can_invite = false;
+    static constexpr uint32 CACHE_VERSION = 1;
+    uint32 cache_version = 0;
+
     bool sign_messages = false;
 
     bool is_megagroup = false;
     bool is_verified = false;
+    bool is_scam = false;
 
     bool is_title_changed = true;
     bool is_username_changed = true;
     bool is_photo_changed = true;
+    bool is_default_permissions_changed = true;
     bool is_status_changed = true;
     bool had_read_access = true;
     bool was_member = false;
     bool is_changed = true;        // have new changes not sent to the database except changes visible to the client
     bool need_send_update = true;  // have new changes not sent to the client
+
+    bool is_repaired = false;  // whether cached value is rechecked
 
     bool is_saved = false;        // is current channel version being saved/is saved to the database
     bool is_being_saved = false;  // is current channel being saved to the database
@@ -697,7 +729,7 @@ class ContactsManager : public Actor {
     ChatId chat_id;  // TODO DialogId
     ChannelId channel_id;
     string title;
-    DialogPhoto photo;
+    Photo photo;
     int32 participant_count = 0;
     vector<UserId> participant_user_ids;
 
@@ -714,7 +746,7 @@ class ContactsManager : public Actor {
 
   static constexpr int32 MAX_GET_PROFILE_PHOTOS = 100;        // server side limit
   static constexpr size_t MAX_NAME_LENGTH = 64;               // server side limit for first/last name
-  static constexpr size_t MAX_DESCRIPTION_LENGTH = 255;       // server side limit for channel description
+  static constexpr size_t MAX_DESCRIPTION_LENGTH = 255;       // server side limit for chat/channel description
   static constexpr size_t MAX_BIO_LENGTH = 70;                // server side limit
   static constexpr int32 MAX_GET_CHANNEL_PARTICIPANTS = 200;  // server side limit
 
@@ -740,6 +772,7 @@ class ContactsManager : public Actor {
   static constexpr int32 USER_FLAG_NEED_LOCATION_BOT = 1 << 21;
   static constexpr int32 USER_FLAG_HAS_LANGUAGE_CODE = 1 << 22;
   static constexpr int32 USER_FLAG_IS_SUPPORT = 1 << 23;
+  static constexpr int32 USER_FLAG_IS_SCAM = 1 << 24;
 
   static constexpr int32 USER_FULL_FLAG_IS_BLOCKED = 1 << 0;
   static constexpr int32 USER_FULL_FLAG_HAS_ABOUT = 1 << 1;
@@ -751,8 +784,8 @@ class ContactsManager : public Actor {
   static constexpr int32 CHAT_FLAG_USER_IS_CREATOR = 1 << 0;
   static constexpr int32 CHAT_FLAG_USER_WAS_KICKED = 1 << 1;
   static constexpr int32 CHAT_FLAG_USER_HAS_LEFT = 1 << 2;
-  static constexpr int32 CHAT_FLAG_ADMINISTRATORS_ENABLED = 1 << 3;
-  static constexpr int32 CHAT_FLAG_IS_ADMINISTRATOR = 1 << 4;
+  // static constexpr int32 CHAT_FLAG_ADMINISTRATORS_ENABLED = 1 << 3;
+  // static constexpr int32 CHAT_FLAG_IS_ADMINISTRATOR = 1 << 4;
   static constexpr int32 CHAT_FLAG_IS_DEACTIVATED = 1 << 5;
   static constexpr int32 CHAT_FLAG_WAS_MIGRATED = 1 << 6;
 
@@ -765,7 +798,7 @@ class ContactsManager : public Actor {
   static constexpr int32 CHANNEL_FLAG_IS_VERIFIED = 1 << 7;
   static constexpr int32 CHANNEL_FLAG_IS_MEGAGROUP = 1 << 8;
   static constexpr int32 CHANNEL_FLAG_IS_RESTRICTED = 1 << 9;
-  static constexpr int32 CHANNEL_FLAG_ANYONE_CAN_INVITE = 1 << 10;
+  // static constexpr int32 CHANNEL_FLAG_ANYONE_CAN_INVITE = 1 << 10;
   static constexpr int32 CHANNEL_FLAG_SIGN_MESSAGES = 1 << 11;
   static constexpr int32 CHANNEL_FLAG_IS_MIN = 1 << 12;
   static constexpr int32 CHANNEL_FLAG_HAS_ACCESS_HASH = 1 << 13;
@@ -773,6 +806,7 @@ class ContactsManager : public Actor {
   static constexpr int32 CHANNEL_FLAG_HAS_BANNED_RIGHTS = 1 << 15;
   static constexpr int32 CHANNEL_FLAG_HAS_UNBAN_DATE = 1 << 16;
   static constexpr int32 CHANNEL_FLAG_HAS_PARTICIPANT_COUNT = 1 << 17;
+  static constexpr int32 CHANNEL_FLAG_IS_SCAM = 1 << 19;
 
   static constexpr int32 CHANNEL_FULL_FLAG_HAS_PARTICIPANT_COUNT = 1 << 0;
   static constexpr int32 CHANNEL_FULL_FLAG_HAS_ADMINISTRATOR_COUNT = 1 << 1;
@@ -803,8 +837,8 @@ class ContactsManager : public Actor {
 
   static const CSlice INVITE_LINK_URLS[3];
 
-  static bool have_input_peer_user(const User *user, AccessRights access_rights);
-  static bool have_input_peer_chat(const Chat *chat, AccessRights access_rights);
+  static bool have_input_peer_user(const User *u, AccessRights access_rights);
+  static bool have_input_peer_chat(const Chat *c, AccessRights access_rights);
   static bool have_input_peer_channel(const Channel *c, AccessRights access_rights);
   static bool have_input_encrypted_peer(const SecretChat *secret_chat, AccessRights access_rights);
 
@@ -851,9 +885,11 @@ class ContactsManager : public Actor {
   SecretChat *add_secret_chat(SecretChatId secret_chat_id);
 
   static DialogParticipantStatus get_chat_status(const Chat *c);
+  DialogParticipantStatus get_chat_permissions(const Chat *c) const;
 
   static ChannelType get_channel_type(const Channel *c);
   static DialogParticipantStatus get_channel_status(const Channel *c);
+  DialogParticipantStatus get_channel_permissions(const Channel *c) const;
   static bool get_channel_sign_messages(const Channel *c);
 
   void set_my_id(UserId my_id);
@@ -866,12 +902,14 @@ class ContactsManager : public Actor {
 
   void on_update_user_name(User *u, UserId user_id, string &&first_name, string &&last_name, string &&username);
   void on_update_user_phone_number(User *u, UserId user_id, string &&phone_number);
-  void on_update_user_photo(User *u, UserId user_id, tl_object_ptr<telegram_api::UserProfilePhoto> &&photo);
+  void on_update_user_photo(User *u, UserId user_id, tl_object_ptr<telegram_api::UserProfilePhoto> &&photo,
+                            const char *source);
   void on_update_user_online(User *u, UserId user_id, tl_object_ptr<telegram_api::UserStatus> &&status);
   void on_update_user_local_was_online(User *u, UserId user_id, int32 local_was_online);
   void on_update_user_links(User *u, UserId user_id, LinkState outbound, LinkState inbound);
 
-  void do_update_user_photo(User *u, UserId user_id, tl_object_ptr<telegram_api::UserProfilePhoto> &&photo);
+  void do_update_user_photo(User *u, UserId user_id, tl_object_ptr<telegram_api::UserProfilePhoto> &&photo,
+                            const char *source);
 
   void add_user_photo_id(User *u, UserId user_id, int64 photo_id, const vector<FileId> &photo_file_ids);
 
@@ -881,19 +919,18 @@ class ContactsManager : public Actor {
                                     tl_object_ptr<telegram_api::botInfo> &&bot_info);
   void invalidate_user_full(UserId user_id);
 
-  void on_update_chat_left(Chat *c, ChatId chat_id, bool left, bool kicked);
+  void on_update_chat_status(Chat *c, ChatId chat_id, DialogParticipantStatus status);
+  void on_update_chat_default_permissions(Chat *c, ChatId chat_id, RestrictedRights default_permissions, int32 version);
   void on_update_chat_participant_count(Chat *c, ChatId chat_id, int32 participant_count, int32 version,
                                         const string &debug_str);
   void on_update_chat_photo(Chat *c, ChatId chat_id, tl_object_ptr<telegram_api::ChatPhoto> &&chat_photo_ptr);
-  void on_update_chat_rights(Chat *c, ChatId chat_id, bool is_creator, bool is_administrator,
-                             bool everyone_is_administrator);
   void on_update_chat_title(Chat *c, ChatId chat_id, string &&title);
   void on_update_chat_active(Chat *c, ChatId chat_id, bool is_active);
   void on_update_chat_migrated_to_channel_id(Chat *c, ChatId chat_id, ChannelId migrated_to_channel_id);
 
   bool on_update_chat_full_participants_short(ChatFull *chat_full, ChatId chat_id, int32 version);
   void on_update_chat_full_participants(ChatFull *chat_full, ChatId chat_id, vector<DialogParticipant> participants,
-                                        int32 version);
+                                        int32 version, bool from_update);
   void on_update_chat_full_invite_link(ChatFull *chat_full,
                                        tl_object_ptr<telegram_api::ExportedChatInvite> &&invite_link_ptr);
 
@@ -902,6 +939,7 @@ class ContactsManager : public Actor {
   void on_update_channel_title(Channel *c, ChannelId channel_id, string &&title);
   void on_update_channel_username(Channel *c, ChannelId channel_id, string &&username);
   void on_update_channel_status(Channel *c, ChannelId channel_id, DialogParticipantStatus &&status);
+  void on_update_channel_default_permissions(Channel *c, ChannelId channel_id, RestrictedRights default_permissions);
 
   void on_update_channel_full_invite_link(ChannelFull *channel_full,
                                           tl_object_ptr<telegram_api::ExportedChatInvite> &&invite_link_ptr);
@@ -978,6 +1016,8 @@ class ContactsManager : public Actor {
   void update_channel_full(ChannelFull *channel_full, ChannelId channel_id);
 
   bool is_chat_full_outdated(const ChatFull *chat_full, const Chat *c, ChatId chat_id) const;
+
+  bool is_user_contact(const User *u, UserId user_id) const;
 
   int32 get_user_was_online(const User *u, UserId user_id) const;
 
@@ -1064,6 +1104,8 @@ class ContactsManager : public Actor {
   static void on_user_online_timeout_callback(void *contacts_manager_ptr, int64 user_id_long);
 
   static void on_channel_unban_timeout_callback(void *contacts_manager_ptr, int64 channel_id_long);
+
+  void on_user_online_timeout(UserId user_id);
 
   template <class StorerT>
   static void store_link_state(const LinkState &link_state, StorerT &storer);

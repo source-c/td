@@ -12,6 +12,8 @@
 #include "td/telegram/AudiosManager.hpp"
 #include "td/telegram/ChannelId.h"
 #include "td/telegram/ContactsManager.h"
+#include "td/telegram/DialogId.h"
+#include "td/telegram/Document.h"
 #include "td/telegram/DocumentsManager.h"
 #include "td/telegram/DocumentsManager.hpp"
 #include "td/telegram/files/FileId.h"
@@ -72,12 +74,7 @@ class RichText {
   void append_file_ids(vector<FileId> &file_ids) const {
     if (type == RichText::Type::Icon) {
       CHECK(document_file_id.is_valid());
-      file_ids.push_back(document_file_id);
-      auto thumbnail_file_id =
-          G()->td().get_actor_unsafe()->documents_manager_->get_document_thumbnail_file_id(document_file_id);
-      if (thumbnail_file_id.is_valid()) {
-        file_ids.push_back(thumbnail_file_id);
-      }
+      Document(Document::Type::General, document_file_id).append_file_ids(G()->td().get_actor_unsafe(), file_ids);
     } else {
       for (auto &text : texts) {
         text.append_file_ids(file_ids);
@@ -622,7 +619,7 @@ class WebPageBlockPreformatted : public WebPageBlock {
 
  public:
   WebPageBlockPreformatted() = default;
-  WebPageBlockPreformatted(RichText &&text, string language) : text(std::move(text)), language(std::move(language)) {
+  WebPageBlockPreformatted(RichText &&text, string &&language) : text(std::move(text)), language(std::move(language)) {
   }
 
   Type get_type() const override {
@@ -712,7 +709,7 @@ class WebPageBlockAnchor : public WebPageBlock {
 
  public:
   WebPageBlockAnchor() = default;
-  explicit WebPageBlockAnchor(string name) : name(std::move(name)) {
+  explicit WebPageBlockAnchor(string &&name) : name(std::move(name)) {
   }
 
   Type get_type() const override {
@@ -919,14 +916,7 @@ class WebPageBlockAnimation : public WebPageBlock {
 
   void append_file_ids(vector<FileId> &file_ids) const override {
     caption.append_file_ids(file_ids);
-    if (animation_file_id.is_valid()) {
-      file_ids.push_back(animation_file_id);
-      auto thumbnail_file_id =
-          G()->td().get_actor_unsafe()->animations_manager_->get_animation_thumbnail_file_id(animation_file_id);
-      if (thumbnail_file_id.is_valid()) {
-        file_ids.push_back(thumbnail_file_id);
-      }
-    }
+    Document(Document::Type::Animation, animation_file_id).append_file_ids(G()->td().get_actor_unsafe(), file_ids);
   }
 
   td_api::object_ptr<td_api::PageBlock> get_page_block_object() const override {
@@ -984,7 +974,7 @@ class WebPageBlockPhoto : public WebPageBlock {
 
  public:
   WebPageBlockPhoto() = default;
-  WebPageBlockPhoto(Photo photo, WebPageBlockCaption &&caption, string &&url, WebPageId web_page_id)
+  WebPageBlockPhoto(Photo &&photo, WebPageBlockCaption &&caption, string &&url, WebPageId web_page_id)
       : photo(std::move(photo)), caption(std::move(caption)), url(std::move(url)), web_page_id(web_page_id) {
   }
 
@@ -993,6 +983,7 @@ class WebPageBlockPhoto : public WebPageBlock {
   }
 
   void append_file_ids(vector<FileId> &file_ids) const override {
+    append(file_ids, photo_get_file_ids(photo));
     caption.append_file_ids(file_ids);
   }
 
@@ -1044,14 +1035,7 @@ class WebPageBlockVideo : public WebPageBlock {
 
   void append_file_ids(vector<FileId> &file_ids) const override {
     caption.append_file_ids(file_ids);
-    if (video_file_id.is_valid()) {
-      file_ids.push_back(video_file_id);
-      auto thumbnail_file_id =
-          G()->td().get_actor_unsafe()->videos_manager_->get_video_thumbnail_file_id(video_file_id);
-      if (thumbnail_file_id.is_valid()) {
-        file_ids.push_back(thumbnail_file_id);
-      }
-    }
+    Document(Document::Type::Video, video_file_id).append_file_ids(G()->td().get_actor_unsafe(), file_ids);
   }
 
   td_api::object_ptr<td_api::PageBlock> get_page_block_object() const override {
@@ -1146,7 +1130,7 @@ class WebPageBlockEmbedded : public WebPageBlock {
 
  public:
   WebPageBlockEmbedded() = default;
-  WebPageBlockEmbedded(string url, string html, Photo poster_photo, Dimensions dimensions,
+  WebPageBlockEmbedded(string &&url, string &&html, Photo &&poster_photo, Dimensions dimensions,
                        WebPageBlockCaption &&caption, bool is_full_width, bool allow_scrolling)
       : url(std::move(url))
       , html(std::move(html))
@@ -1213,7 +1197,7 @@ class WebPageBlockEmbeddedPost : public WebPageBlock {
 
  public:
   WebPageBlockEmbeddedPost() = default;
-  WebPageBlockEmbeddedPost(string url, string author, Photo author_photo, int32 date,
+  WebPageBlockEmbeddedPost(string &&url, string &&author, Photo &&author_photo, int32 date,
                            vector<unique_ptr<WebPageBlock>> &&page_blocks, WebPageBlockCaption &&caption)
       : url(std::move(url))
       , author(std::move(author))
@@ -1353,7 +1337,7 @@ class WebPageBlockChatLink : public WebPageBlock {
 
  public:
   WebPageBlockChatLink() = default;
-  WebPageBlockChatLink(string title, DialogPhoto photo, string username)
+  WebPageBlockChatLink(string &&title, DialogPhoto photo, string &&username)
       : title(std::move(title)), photo(std::move(photo)), username(std::move(username)) {
   }
 
@@ -1402,14 +1386,7 @@ class WebPageBlockAudio : public WebPageBlock {
   }
 
   void append_file_ids(vector<FileId> &file_ids) const override {
-    if (audio_file_id.is_valid()) {
-      file_ids.push_back(audio_file_id);
-      auto thumbnail_file_id =
-          G()->td().get_actor_unsafe()->audios_manager_->get_audio_thumbnail_file_id(audio_file_id);
-      if (thumbnail_file_id.is_valid()) {
-        file_ids.push_back(thumbnail_file_id);
-      }
-    }
+    Document(Document::Type::Audio, audio_file_id).append_file_ids(G()->td().get_actor_unsafe(), file_ids);
     caption.append_file_ids(file_ids);
   }
 
@@ -2023,8 +2000,11 @@ unique_ptr<WebPageBlock> get_web_page_block(Td *td, tl_object_ptr<telegram_api::
                                                        *td->contacts_manager_->get_channel_dialog_photo(channel_id),
                                                        td->contacts_manager_->get_channel_username(channel_id));
         } else {
+          bool has_access_hash = (channel->flags_ & telegram_api::channel::ACCESS_HASH_MASK) != 0;
           return td::make_unique<WebPageBlockChatLink>(
-              std::move(channel->title_), get_dialog_photo(td->file_manager_.get(), std::move(channel->photo_)),
+              std::move(channel->title_),
+              get_dialog_photo(td->file_manager_.get(), DialogId(channel_id),
+                               has_access_hash ? channel->access_hash_ : 0, std::move(channel->photo_)),
               std::move(channel->username_));
         }
       } else {
@@ -2201,8 +2181,9 @@ void WebPageBlock::call_impl(Type type, const WebPageBlock *ptr, F &&f) {
       return f(static_cast<const WebPageBlockRelatedArticles *>(ptr));
     case Type::Map:
       return f(static_cast<const WebPageBlockMap *>(ptr));
+    default:
+      UNREACHABLE();
   }
-  UNREACHABLE();
 }
 
 template <class StorerT>
@@ -2216,6 +2197,10 @@ template <class ParserT>
 unique_ptr<WebPageBlock> WebPageBlock::parse(ParserT &parser) {
   Type type;
   td::parse(type, parser);
+  if (static_cast<int32>(type) < 0 || static_cast<int32>(type) >= static_cast<int32>(Type::Size)) {
+    parser.set_error(PSTRING() << "Can't parse unknown BlockType " << static_cast<int32>(type));
+    return nullptr;
+  }
   unique_ptr<WebPageBlock> res;
   call_impl(type, nullptr, [&](const auto *ptr) {
     using ObjT = std::decay_t<decltype(*ptr)>;

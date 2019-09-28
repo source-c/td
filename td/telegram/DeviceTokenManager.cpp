@@ -69,7 +69,7 @@ void DeviceTokenManager::TokenInfo::parse(ParserT &parser) {
   PARSE_FLAG(is_register);
   PARSE_FLAG(is_app_sandbox);
   PARSE_FLAG(encrypt);
-  END_PARSE_FLAGS_GENERIC();
+  END_PARSE_FLAGS();
   CHECK(is_sync + is_unregister + is_register == 1);
   if (is_sync) {
     state = State::Sync;
@@ -317,7 +317,10 @@ void DeviceTokenManager::start_up() {
       }
       token.token = serialized.substr(1);
     }
-    LOG(INFO) << "GET device token " << token_type << "--->" << tokens_[token_type];
+    LOG(INFO) << "GET device token " << token_type << "--->" << token;
+    if (token.state == TokenInfo::State::Sync) {
+      token.state = TokenInfo::State::Register;
+    }
   }
   loop();
 }
@@ -411,7 +414,7 @@ void DeviceTokenManager::on_result(NetQueryPtr net_query) {
       info.state = TokenInfo::State::Sync;
       info.token.clear();
     }
-    if (r_flag.is_error()) {
+    if (r_flag.is_error() && !G()->close_flag()) {
       LOG(ERROR) << r_flag.error();
     }
   }

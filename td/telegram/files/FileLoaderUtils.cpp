@@ -130,7 +130,8 @@ Result<string> search_file(CSlice dir, CSlice name, int64 expected_size) {
     FileFd fd;
     std::string path;
     std::tie(fd, path) = r_pair.move_as_ok();
-    if (fd.stat().size_ != expected_size) {
+    auto r_size = fd.get_size();
+    if (r_size.is_error() || r_size.ok() != expected_size) {
       return true;
     }
     fd.close();
@@ -141,6 +142,15 @@ Result<string> search_file(CSlice dir, CSlice name, int64 expected_size) {
 }
 
 Result<FullLocalFileLocation> save_file_bytes(FileType type, BufferSlice bytes, CSlice file_name) {
+  auto r_old_path = search_file(get_files_dir(type), file_name, bytes.size());
+  if (r_old_path.is_ok()) {
+    auto r_old_bytes = read_file(r_old_path.ok());
+    if (r_old_bytes.is_ok() && r_old_bytes.ok().as_slice() == bytes.as_slice()) {
+      LOG(INFO) << "Found previous file with the same name " << r_old_path.ok();
+      return FullLocalFileLocation(type, r_old_path.ok(), 0);
+    }
+  }
+
   TRY_RESULT(fd_path, open_temp_file(type));
   FileFd fd = std::move(fd_path.first);
   string path = std::move(fd_path.second);
@@ -161,7 +171,7 @@ Result<FullLocalFileLocation> save_file_bytes(FileType type, BufferSlice bytes, 
 static Slice get_file_base_dir(const FileDirType &file_dir_type) {
   switch (file_dir_type) {
     case FileDirType::Secure:
-      return G()->get_dir();
+      return G()->get_secure_files_dir();
     case FileDirType::Common:
       return G()->get_files_dir();
     default:

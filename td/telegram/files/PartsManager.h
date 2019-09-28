@@ -23,7 +23,7 @@ struct Part {
 class PartsManager {
  public:
   Status init(int64 size, int64 expected_size, bool is_size_final, size_t part_size,
-              const std::vector<int> &ready_parts, bool use_part_count_limit) TD_WARN_UNUSED_RESULT;
+              const std::vector<int> &ready_parts, bool use_part_count_limit, bool is_upload) TD_WARN_UNUSED_RESULT;
   bool may_finish();
   bool ready();
   bool unchecked_ready();
@@ -50,6 +50,7 @@ class PartsManager {
   int32 get_part_count() const;
   int32 get_unchecked_ready_prefix_count();
   int32 get_ready_prefix_count();
+  int64 get_streaming_offset() const;
   string get_bitmask();
 
  private:
@@ -59,6 +60,7 @@ class PartsManager {
 
   enum class PartStatus : int32 { Empty, Pending, Ready };
 
+  bool is_upload_{false};
   bool need_check_{false};
   int64 checked_prefix_size_{0};
 
@@ -86,7 +88,7 @@ class PartsManager {
   Bitmask bitmask_;
   bool use_part_count_limit_;
 
-  void init_common(const vector<int> &ready_parts);
+  Status init_common(const vector<int> &ready_parts);
   Status init_known_prefix(int64 known_prefix, size_t part_size,
                            const std::vector<int> &ready_parts) TD_WARN_UNUSED_RESULT;
   Status init_no_size(size_t part_size, const std::vector<int> &ready_parts) TD_WARN_UNUSED_RESULT;

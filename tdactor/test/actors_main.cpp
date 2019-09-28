@@ -12,9 +12,11 @@
 #include "td/utils/common.h"
 #include "td/utils/logging.h"
 #include "td/utils/Random.h"
+#include "td/utils/ScopeGuard.h"
 
 #include <limits>
 #include <map>
+#include <memory>
 #include <utility>
 
 using namespace td;
@@ -459,6 +461,61 @@ TEST(Actors, do_after_stop) {
   sched.init(threads_n);
 
   sched.create_actor_unsafe<DoAfterStop>(0, "DoAfterStop").release();
+  sched.start();
+  while (sched.run_main(10)) {
+    // empty
+  }
+  sched.finish();
+}
+
+class XContext : public ActorContext {
+ public:
+  int32 get_id() const override {
+    return 123456789;
+  }
+
+  void validate() {
+    CHECK(x == 1234);
+  }
+  ~XContext() {
+    x = 0;
+  }
+  int x = 1234;
+};
+
+class WithXContext : public Actor {
+ public:
+  void start_up() override {
+    auto old_context = set_context(std::make_shared<XContext>());
+  }
+  void f(unique_ptr<Guard> guard) {
+  }
+  void close() {
+    stop();
+  }
+};
+
+static void check_context() {
+  auto ptr = static_cast<XContext *>(Scheduler::context());
+  CHECK(ptr);
+  ptr->validate();
+}
+
+TEST(Actors, context_during_destruction) {
+  SET_VERBOSITY_LEVEL(VERBOSITY_NAME(ERROR));
+
+  ConcurrentScheduler sched;
+  int threads_n = 0;
+  sched.init(threads_n);
+
+  {
+    auto guard = sched.get_main_guard();
+    auto with_context = create_actor<WithXContext>("WithXContext").release();
+    send_closure(with_context, &WithXContext::f, create_lambda_guard([] { check_context(); }));
+    send_closure_later(with_context, &WithXContext::close);
+    send_closure(with_context, &WithXContext::f, create_lambda_guard([] { check_context(); }));
+    send_closure(with_context, &WithXContext::f, create_lambda_guard([] { Scheduler::instance()->finish(); }));
+  }
   sched.start();
   while (sched.run_main(10)) {
     // empty

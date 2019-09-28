@@ -1,6 +1,5 @@
 import MyWorker from './worker.js';
 //import localforage from 'localforage';
-//import './third_party/broadcastchannel.js';
 import BroadcastChannel from 'broadcast-channel';
 import uuid4 from 'uuid/v4';
 import log from './logger.js';
@@ -22,8 +21,7 @@ const sleep = ms => new Promise(res => setTimeout(res, ms));
  * 2. Added the method <code>setJsLogVerbosityLevel new_verbosity_level:string = Ok;</code>, which allows to change the verbosity level of tdweb logging.<br>
  * 3. Added the possibility to use blobs as input files via the constructor <code>inputFileBlob data:<JavaScript blob> = InputFile;</code>.<br>
  * 4. The class <code>filePart</code> contains data as a JavaScript blob instead of a base64-encoded string.<br>
- * 5. The method <code>readFilePart</code> supports only <code>offset == count == 0</code>.<br>
- * 6. The methods <code>getStorageStatistics</code>, <code>getStorageStatisticsFast</code>, <code>optimizeStorage</code>, <code>addProxy</code> and <code>getFileDownloadedPrefixSize</code> are not supported.<br>
+ * 5. The methods <code>getStorageStatistics</code>, <code>getStorageStatisticsFast</code>, <code>optimizeStorage</code>, <code>addProxy</code> and <code>getFileDownloadedPrefixSize</code> are not supported.<br>
  * <br>
  */
 class TdClient {
@@ -57,7 +55,7 @@ class TdClient {
       delete options.onUpdate;
     }
     options.instanceName = options.instanceName || 'tdlib';
-    this.fileManager = new FileManager(options.instanceName);
+    this.fileManager = new FileManager(options.instanceName, this);
     this.worker.postMessage({ '@type': 'init', options: options });
     this.closeOtherClients(options);
   }
@@ -416,7 +414,7 @@ class ListNode {
 
   onUsed(other) {
     other.usedAt = Date.now();
-    other.clear();
+    other.erase();
     other.connect(this.next);
     log.debug('LRU: used file_id: ', other.value);
     this.connect(other);
@@ -432,13 +430,14 @@ class ListNode {
 
 /** @private */
 class FileManager {
-  constructor(instanceName) {
+  constructor(instanceName, client) {
     this.instanceName = instanceName;
     this.cache = new Map();
     this.pending = [];
     this.transaction_id = 0;
     this.totalSize = 0;
     this.lru = new ListNode(-1);
+    this.client = client;
   }
 
   init() {
@@ -471,53 +470,56 @@ class FileManager {
   }
 
   registerFile(file) {
-    const cached_info = this.cache.get(file.id);
-    if (cached_info && !file.idb_key) {
-      delete cached_info.idb_key;
-    }
     if (file.idb_key || file.arr) {
-      file.is_downloading_completed = true;
-      let info = {};
-      if (cached_info) {
-        info = cached_info;
-      } else {
-        this.cache.set(file.id, info);
-      }
-      if (file.idb_key) {
-        info.idb_key = file.idb_key;
-        delete file.idb_key;
-      }
-      if (file.arr) {
-        const now = Date.now();
-        while (this.totalSize > 10000000) {
-          const node = this.lru.getLru();
-          // immunity for 5 seconds
-          if (node.usedAt + 5 * 1000 > now) {
-            break;
-          }
-          const lru_info = this.cache.get(node.value);
-          this.unload(lru_info);
-        }
-
-        if (info.arr) {
-          log.warn('Got file.arr at least twice for the same file');
-          this.totalSize -= info.arr.length;
-        }
-        info.arr = file.arr;
-        this.totalSize += info.arr.length;
-        if (!info.node) {
-          log.debug(
-            'LRU: create file_id: ',
-            file.id,
-            ' with arr.length: ',
-            info.arr.length
-          );
-          info.node = new ListNode(file.id);
-        }
-        this.lru.onUsed(info.node);
-        log.info('Total file.arr size: ', this.totalSize);
-      }
+      file.local.is_downloading_completed = true;
+    } else {
+      file.local.is_downloading_completed = false;
     }
+    let info = {};
+    const cached_info = this.cache.get(file.id);
+    if (cached_info) {
+      info = cached_info;
+    } else {
+      this.cache.set(file.id, info);
+    }
+    if (file.idb_key) {
+      info.idb_key = file.idb_key;
+      delete file.idb_key;
+    } else {
+      delete info.idb_key;
+    }
+    if (file.arr) {
+      const now = Date.now();
+      while (this.totalSize > 100000000) {
+        const node = this.lru.getLru();
+        // immunity for 60 seconds
+        if (node.usedAt + 60 * 1000 > now) {
+          break;
+        }
+        const lru_info = this.cache.get(node.value);
+        this.unload(lru_info);
+      }
+
+      if (info.arr) {
+        log.warn('Got file.arr at least twice for the same file');
+        this.totalSize -= info.arr.length;
+      }
+      info.arr = file.arr;
+      delete file.arr;
+      this.totalSize += info.arr.length;
+      if (!info.node) {
+        log.debug(
+          'LRU: create file_id: ',
+          file.id,
+          ' with arr.length: ',
+          info.arr.length
+        );
+        info.node = new ListNode(file.id);
+      }
+      this.lru.onUsed(info.node);
+      log.info('Total file.arr size: ', this.totalSize);
+    }
+    info.file = file;
     return file;
   }
 
@@ -535,12 +537,15 @@ class FileManager {
       request.onsuccess = event => {
         const blob = event.target.result;
         if (blob) {
+          if (blob.size === 0) {
+            log.error('Got empty blob from db ', query.key);
+          }
           query.resolve({ data: blob, transaction_id: transaction_id });
         } else {
           query.reject();
         }
       };
-      request.onerror = query.reject;
+      request.onerror = () => query.reject(request.error);
     }
   }
 
@@ -553,15 +558,60 @@ class FileManager {
     this.pending.push({ key: key, resolve: resolve, reject: reject });
   }
 
-  async doLoad(info) {
+  async doLoadFull(info) {
     if (info.arr) {
       return { data: new Blob([info.arr]), transaction_id: -1 };
     }
-    const idb_key = info.idb_key;
-    //return this.store.getItem(idb_key);
-    return await new Promise((resolve, reject) => {
-      this.load(idb_key, resolve, reject);
-    });
+    if (info.idb_key) {
+      const idb_key = info.idb_key;
+      //return this.store.getItem(idb_key);
+      return await new Promise((resolve, reject) => {
+        this.load(idb_key, resolve, reject);
+      });
+    }
+    throw new Error('File is not loaded');
+  }
+  async doLoad(info, offset, size) {
+    if (!info.arr && !info.idb_key && info.file.local.path) {
+      try {
+        const count = await this.client.sendInternal({
+          '@type': 'getFileDownloadedPrefixSize',
+          file_id: info.file.id,
+          offset: offset
+        });
+        log.error(count, size);
+        if (!size) {
+          size = count.count;
+        } else if (size > count.count) {
+          throw new Error('File not loaded yet');
+        }
+        const res = await this.client.sendInternal({
+          '@type': 'readFilePart',
+          path: info.file.local.path,
+          offset: offset,
+          size: size
+        });
+        res.data = new Blob([res.data]);
+        res.transaction_id = -2;
+        log.error(res);
+        return res;
+      } catch (e) {
+        log.info('readFilePart failed', info, offset, size, e);
+      }
+    }
+
+    const res = await this.doLoadFull(info);
+
+    // return slice(size, offset + size)
+    const data_size = res.data.size;
+    if (!size) {
+      size = data_size;
+    }
+    if (offset > data_size) {
+      offset = data_size;
+    }
+    res.data = res.data.slice(offset, offset + size);
+    return res;
   }
 
   doDelete(info) {
@@ -571,9 +621,6 @@ class FileManager {
 
   async readFile(query) {
     try {
-      if (query.offset || query.size) {
-        throw new Error('readFilePart: offset and size are not supported yet');
-      }
       if (!this.isInited) {
         throw new Error('FileManager is not inited');
       }
@@ -584,7 +631,9 @@ class FileManager {
       if (info.node) {
         this.lru.onUsed(info.node);
       }
-      const response = await this.doLoad(info);
+      query.offset = query.offset || 0;
+      query.size = query.size || 0;
+      const response = await this.doLoad(info, query.offset, query.size);
       return {
         '@type': 'filePart',
         '@extra': query['@extra'],

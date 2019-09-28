@@ -39,7 +39,8 @@
 #include <tuple>
 #include <type_traits>
 
-#define G GLOBAL_SHOULD_NOT_BE_USED_HERE
+//#define G GLOBAL_SHOULD_NOT_BE_USED_HERE
+#undef G
 
 namespace td {
 
@@ -496,8 +497,8 @@ void SecretChatActor::send_action(tl_object_ptr<secret_api::DecryptedMessageActi
 
 void SecretChatActor::binlog_replay_finish() {
   on_his_in_seq_no_updated();
-  LOG(INFO) << "Binlog replay is finished with SeqNoState=" << seq_no_state_;
-  LOG(INFO) << "Binlog replay is finished with PfsState=" << pfs_state_;
+  LOG(INFO) << "Binlog replay is finished with SeqNoState " << seq_no_state_;
+  LOG(INFO) << "Binlog replay is finished with PfsState " << pfs_state_;
   binlog_replay_finish_flag_ = true;
   if (auth_state_.state == State::Ready) {
     if (config_state_.my_layer < MY_LAYER) {
@@ -827,7 +828,7 @@ Result<std::tuple<uint64, BufferSlice, int32>> SecretChatActor::decrypt(BufferSl
                                      << tag("crc", crc64(encrypted_message.as_slice())));
   }
 
-  // expect that message is encrypted with mtproto 2.0 if his layer is at least MTPROTO_2_LAYER
+  // expect that message is encrypted with mtproto 2.0 if their layer is at least MTPROTO_2_LAYER
   std::array<int, 2> versions{{1, 2}};
   if (config_state_.his_layer >= MTPROTO_2_LAYER) {
     std::swap(versions[0], versions[1]);
@@ -895,6 +896,7 @@ Status SecretChatActor::do_inbound_message_encrypted(unique_ptr<logevent::Inboun
   Status status;
   if (id == secret_api::decryptedMessageLayer::ID) {
     auto message_with_layer = secret_api::decryptedMessageLayer::fetch(parser);
+    parser.fetch_end();
     if (!parser.get_error()) {
       auto layer = message_with_layer->layer_;
       if (layer < DEFAULT_LAYER && false /*TODO: fix android app bug? */) {
@@ -930,6 +932,7 @@ Status SecretChatActor::do_inbound_message_encrypted(unique_ptr<logevent::Inboun
   if (config_state_.his_layer == 8) {
     TlBufferParser new_parser(&data_buffer);
     auto message_without_layer = secret_api::DecryptedMessage::fetch(new_parser);
+    parser.fetch_end();
     if (!new_parser.get_error()) {
       message->decrypted_message_layer = secret_api::make_object<secret_api::decryptedMessageLayer>(
           BufferSlice(), config_state_.his_layer, -1, -1, std::move(message_without_layer));
@@ -1080,7 +1083,7 @@ void SecretChatActor::do_outbound_message_impl(unique_ptr<logevent::OutboundSecr
       send_closure(actor_id, &SecretChatActor::on_outbound_send_message_start, state_id);
     } else {
       send_closure(actor_id, &SecretChatActor::on_promise_error, result.move_as_error(),
-                   "on_oubound_send_message_start");
+                   "on_outbound_send_message_start");
     }
   });
 
@@ -1320,14 +1323,15 @@ Status SecretChatActor::do_inbound_message_decrypted(unique_ptr<logevent::Inboun
       case secret_api::decryptedMessageActionDeleteMessages::ID:
         // Corresponding logevent won't be deleted before promise returned by add_changes is set.
         context_->on_delete_messages(
-            std::move(static_cast<secret_api::decryptedMessageActionDeleteMessages &>(*action).random_ids_),
+            static_cast<const secret_api::decryptedMessageActionDeleteMessages &>(*action).random_ids_,
             std::move(save_message_finish));
         break;
       case secret_api::decryptedMessageActionFlushHistory::ID:
         context_->on_flush_history(MessageId(ServerMessageId(message->message_id)), std::move(save_message_finish));
         break;
       case secret_api::decryptedMessageActionReadMessages::ID: {
-        auto &random_ids = static_cast<secret_api::decryptedMessageActionReadMessages &>(*action).random_ids_;
+        const auto &random_ids =
+            static_cast<const secret_api::decryptedMessageActionReadMessages &>(*action).random_ids_;
         if (random_ids.size() == 1) {
           context_->on_read_message(random_ids[0], std::move(save_message_finish));
         } else {  // probably never happens
@@ -1347,7 +1351,7 @@ Status SecretChatActor::do_inbound_message_decrypted(unique_ptr<logevent::Inboun
         break;
       case secret_api::decryptedMessageActionSetMessageTTL::ID:
         context_->on_set_ttl(get_user_id(), MessageId(ServerMessageId(message->message_id)), message->date,
-                             static_cast<secret_api::decryptedMessageActionSetMessageTTL &>(*action).ttl_seconds_,
+                             static_cast<const secret_api::decryptedMessageActionSetMessageTTL &>(*action).ttl_seconds_,
                              decrypted_message_service->random_id_, std::move(save_message_finish));
         break;
       default:
@@ -1523,7 +1527,7 @@ void SecretChatActor::outbound_resend(uint64 state_id) {
   state->message->is_sent = false;
   state->net_query_id = 0;
   state->net_query_ref = NetQueryRef();
-  LOG(INFO) << "Oubound message [resend] " << tag("logevent_id", state->message->logevent_id())
+  LOG(INFO) << "Outbound message [resend] " << tag("logevent_id", state->message->logevent_id())
             << tag("state_id", state_id);
 
   binlog_rewrite(context_->binlog(), state->message->logevent_id(), LogEvent::HandlerType::SecretChats,
@@ -1947,8 +1951,8 @@ void SecretChatActor::start_up() {
 
   // auto end = Time::now();
   // CHECK(end - start < 0.2);
-  LOG(INFO) << "In start_up with SeqNoState=" << seq_no_state_;
-  LOG(INFO) << "In start_up with PfsState=" << pfs_state_;
+  LOG(INFO) << "In start_up with SeqNoState " << seq_no_state_;
+  LOG(INFO) << "In start_up with PfsState " << pfs_state_;
 }
 
 void SecretChatActor::get_dh_config() {
@@ -2127,7 +2131,7 @@ void SecretChatActor::on_outbound_action(secret_api::decryptedMessageActionNoop 
 Status SecretChatActor::on_inbound_action(secret_api::decryptedMessageActionRequestKey &request_key) {
   if (pfs_state_.state == PfsState::WaitRequestResponse || pfs_state_.state == PfsState::SendRequest) {
     if (pfs_state_.exchange_id > request_key.exchange_id_) {
-      LOG(INFO) << "RequestKey: silently abort his request";
+      LOG(INFO) << "RequestKey: silently abort their request";
       return Status::OK();
     } else {
       pfs_state_.state = PfsState::Empty;

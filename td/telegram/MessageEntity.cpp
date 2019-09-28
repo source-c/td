@@ -1568,7 +1568,7 @@ Result<vector<MessageEntity>> parse_html(string &text) {
     }
     if (text[i] == 0) {
       return Status::Error(400,
-                           PSLICE() << "Can't found end tag corresponding to start tag at byte offset " << begin_pos);
+                           PSLICE() << "Can't find end tag corresponding to start tag at byte offset " << begin_pos);
     }
 
     auto end_tag_begin_pos = i++;
@@ -1872,8 +1872,7 @@ vector<MessageEntity> get_message_entities(const ContactsManager *contacts_manag
         break;
       }
       case telegram_api::messageEntityTextUrl::ID: {
-        // TODO const telegram_api::messageEntityTextUrl *
-        auto entity_text_url = static_cast<telegram_api::messageEntityTextUrl *>(entity.get());
+        auto entity_text_url = static_cast<const telegram_api::messageEntityTextUrl *>(entity.get());
         auto r_url = check_url(entity_text_url->url_);
         if (r_url.is_error()) {
           LOG(ERROR) << "Wrong URL entity: \"" << entity_text_url->url_ << "\": " << r_url.error().message() << " from "
@@ -2190,6 +2189,7 @@ Status fix_formatted_text(string &text, vector<MessageEntity> &entities, bool al
       text = std::move(result);
     }
   }
+  LOG_CHECK(check_utf8(text)) << text;
 
   if (!allow_empty && is_empty_string(text)) {
     return Status::Error(3, "Message must be non-empty");

@@ -39,6 +39,7 @@ namespace td {
 class AnimationsManager;
 class AudiosManager;
 class AuthManager;
+class BackgroundManager;
 class CallManager;
 class CallbackQueriesManager;
 class ConfigManager;
@@ -66,7 +67,6 @@ class UpdatesManager;
 class VideoNotesManager;
 class VideosManager;
 class VoiceNotesManager;
-class WallpaperManager;
 class WebPagesManager;
 
 }  // namespace td
@@ -140,6 +140,8 @@ class Td final : public NetQueryCallback {
   ActorOwn<AnimationsManager> animations_manager_actor_;
   unique_ptr<AuthManager> auth_manager_;
   ActorOwn<AuthManager> auth_manager_actor_;
+  unique_ptr<BackgroundManager> background_manager_;
+  ActorOwn<BackgroundManager> background_manager_actor_;
   unique_ptr<ContactsManager> contacts_manager_;
   ActorOwn<ContactsManager> contacts_manager_actor_;
   unique_ptr<FileManager> file_manager_;
@@ -158,8 +160,6 @@ class Td final : public NetQueryCallback {
   ActorOwn<StickersManager> stickers_manager_actor_;
   unique_ptr<UpdatesManager> updates_manager_;
   ActorOwn<UpdatesManager> updates_manager_actor_;
-  unique_ptr<WallpaperManager> wallpaper_manager_;
-  ActorOwn<WallpaperManager> wallpaper_manager_actor_;
   unique_ptr<WebPagesManager> web_pages_manager_;
   ActorOwn<WebPagesManager> web_pages_manager_actor_;
 
@@ -224,7 +224,7 @@ class Td final : public NetQueryCallback {
   static td_api::object_ptr<td_api::Object> static_request(td_api::object_ptr<td_api::Function> function);
 
  private:
-  static constexpr const char *TDLIB_VERSION = "1.4.0";
+  static constexpr const char *TDLIB_VERSION = "1.5.0";
   static constexpr int64 ONLINE_ALARM_ID = 0;
   static constexpr int64 PING_SERVER_ALARM_ID = -1;
   static constexpr int32 PING_SERVER_TIMEOUT = 300;
@@ -372,6 +372,8 @@ class Td final : public NetQueryCallback {
 
   void on_request(uint64 id, td_api::checkAuthenticationCode &request);
 
+  void on_request(uint64 id, td_api::registerUser &request);
+
   void on_request(uint64 id, td_api::checkAuthenticationPassword &request);
 
   void on_request(uint64 id, const td_api::requestAuthenticationPasswordRecovery &request);
@@ -472,6 +474,8 @@ class Td final : public NetQueryCallback {
 
   void on_request(uint64 id, const td_api::getMessageLink &request);
 
+  void on_request(uint64 id, td_api::getMessageLinkInfo &request);
+
   void on_request(uint64 id, const td_api::getFile &request);
 
   void on_request(uint64 id, td_api::getRemoteFile &request);
@@ -490,7 +494,11 @@ class Td final : public NetQueryCallback {
 
   void on_request(uint64 id, td_api::addNetworkStatistics &request);
 
-  void on_request(uint64 id, td_api::setNetworkType &request);
+  void on_request(uint64 id, const td_api::setNetworkType &request);
+
+  void on_request(uint64 id, const td_api::getAutoDownloadSettingsPresets &request);
+
+  void on_request(uint64 id, const td_api::setAutoDownloadSettings &request);
 
   void on_request(uint64 id, td_api::getTopChats &request);
 
@@ -604,6 +612,8 @@ class Td final : public NetQueryCallback {
 
   void on_request(uint64 id, const td_api::forwardMessages &request);
 
+  void on_request(uint64 id, const td_api::resendMessages &request);
+
   void on_request(uint64 id, td_api::getWebPagePreview &request);
 
   void on_request(uint64 id, td_api::getWebPageInstantView &request);
@@ -638,6 +648,8 @@ class Td final : public NetQueryCallback {
 
   void on_request(uint64 id, const td_api::setChatPhoto &request);
 
+  void on_request(uint64 id, const td_api::setChatPermissions &request);
+
   void on_request(uint64 id, td_api::setChatDraftMessage &request);
 
   void on_request(uint64 id, const td_api::toggleChatIsPinned &request);
@@ -649,6 +661,8 @@ class Td final : public NetQueryCallback {
   void on_request(uint64 id, const td_api::setPinnedChats &request);
 
   void on_request(uint64 id, td_api::setChatClientData &request);
+
+  void on_request(uint64 id, td_api::setChatDescription &request);
 
   void on_request(uint64 id, const td_api::pinChatMessage &request);
 
@@ -734,19 +748,13 @@ class Td final : public NetQueryCallback {
 
   void on_request(uint64 id, const td_api::getUserProfilePhotos &request);
 
-  void on_request(uint64 id, const td_api::toggleBasicGroupAdministrators &request);
-
   void on_request(uint64 id, td_api::setSupergroupUsername &request);
 
   void on_request(uint64 id, const td_api::setSupergroupStickerSet &request);
 
-  void on_request(uint64 id, const td_api::toggleSupergroupInvites &request);
-
   void on_request(uint64 id, const td_api::toggleSupergroupSignMessages &request);
 
   void on_request(uint64 id, const td_api::toggleSupergroupIsAllHistoryAvailable &request);
-
-  void on_request(uint64 id, td_api::setSupergroupDescription &request);
 
   void on_request(uint64 id, const td_api::reportSupergroupSpam &request);
 
@@ -807,6 +815,10 @@ class Td final : public NetQueryCallback {
   void on_request(uint64 id, td_api::removeSavedAnimation &request);
 
   void on_request(uint64 id, td_api::getStickerEmojis &request);
+
+  void on_request(uint64 id, td_api::searchEmojis &request);
+
+  void on_request(uint64 id, td_api::getEmojiSuggestionsUrl &request);
 
   void on_request(uint64 id, const td_api::getFavoriteStickers &request);
 
@@ -924,7 +936,17 @@ class Td final : public NetQueryCallback {
 
   void on_request(uint64 id, const td_api::getSupportUser &request);
 
-  void on_request(uint64 id, const td_api::getWallpapers &request);
+  void on_request(uint64 id, const td_api::getBackgrounds &request);
+
+  void on_request(uint64 id, td_api::getBackgroundUrl &request);
+
+  void on_request(uint64 id, td_api::searchBackground &request);
+
+  void on_request(uint64 id, td_api::setBackground &request);
+
+  void on_request(uint64 id, const td_api::removeBackground &request);
+
+  void on_request(uint64 id, const td_api::resetBackgrounds &request);
 
   void on_request(uint64 id, td_api::getRecentlyVisitedTMeUrls &request);
 
@@ -1003,12 +1025,13 @@ class Td final : public NetQueryCallback {
   void on_request(uint64 id, const td_api::addLogMessage &request);
 
   // test
-  void on_request(uint64 id, td_api::testNetwork &request);
-  void on_request(uint64 id, td_api::testGetDifference &request);
-  void on_request(uint64 id, td_api::testUseUpdate &request);
-  void on_request(uint64 id, td_api::testUseError &request);
-  void on_request(uint64 id, td_api::testCallEmpty &request);
-  void on_request(uint64 id, td_api::testSquareInt &request);
+  void on_request(uint64 id, const td_api::testNetwork &request);
+  void on_request(uint64 id, td_api::testProxy &request);
+  void on_request(uint64 id, const td_api::testGetDifference &request);
+  void on_request(uint64 id, const td_api::testUseUpdate &request);
+  void on_request(uint64 id, const td_api::testReturnError &request);
+  void on_request(uint64 id, const td_api::testCallEmpty &request);
+  void on_request(uint64 id, const td_api::testSquareInt &request);
   void on_request(uint64 id, td_api::testCallString &request);
   void on_request(uint64 id, td_api::testCallBytes &request);
   void on_request(uint64 id, td_api::testCallVectorInt &request);
@@ -1037,6 +1060,7 @@ class Td final : public NetQueryCallback {
   static td_api::object_ptr<td_api::Object> do_static_request(const td_api::setLogTagVerbosityLevel &request);
   static td_api::object_ptr<td_api::Object> do_static_request(const td_api::getLogTagVerbosityLevel &request);
   static td_api::object_ptr<td_api::Object> do_static_request(const td_api::addLogMessage &request);
+  static td_api::object_ptr<td_api::Object> do_static_request(td_api::testReturnError &request);
 
   static DbKey as_db_key(string key);
   Status init(DbKey key) TD_WARN_UNUSED_RESULT;

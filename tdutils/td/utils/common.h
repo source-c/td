@@ -33,10 +33,10 @@
     #define _CRT_SECURE_NO_WARNINGS
   #endif
 
-  #include <Winsock2.h>
-  #include <ws2tcpip.h>
+  #include <WinSock2.h>
+  #include <WS2tcpip.h>
 
-  #include <Mswsock.h>
+  #include <MSWSock.h>
   #include <Windows.h>
   #undef ERROR
 #endif
@@ -63,6 +63,13 @@
   #define TD_DIR_SLASH '/'
 #endif
 // clang-format on
+
+#if TD_USE_ASAN
+#include <sanitizer/lsan_interface.h>
+#define TD_LSAN_IGNORE(x) __lsan_ignore_object(x)
+#else
+#define TD_LSAN_IGNORE(x) (void)(x)
+#endif
 
 namespace td {
 

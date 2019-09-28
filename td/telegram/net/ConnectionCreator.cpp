@@ -19,8 +19,10 @@
 #include "td/telegram/StateManager.h"
 #include "td/telegram/TdDb.h"
 
-#include "td/mtproto/PingConnection.h"
+#include "td/mtproto/Ping.h"
+#include "td/mtproto/ProxySecret.h"
 #include "td/mtproto/RawConnection.h"
+#include "td/mtproto/TlsInit.h"
 
 #include "td/net/GetHostByNameActor.h"
 #include "td/net/HttpProxy.h"
@@ -32,6 +34,7 @@
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
 #include "td/utils/port/IPAddress.h"
+#include "td/utils/Random.h"
 #include "td/utils/ScopeGuard.h"
 #include "td/utils/Time.h"
 #include "td/utils/tl_helpers.h"
@@ -86,171 +89,7 @@ class StatsCallback final : public mtproto::RawConnection::StatsCallback {
   DcOptionsSet::Stat *option_stat_;
 };
 
-class PingActor : public Actor {
- public:
-  PingActor(unique_ptr<mtproto::RawConnection> raw_connection, Promise<unique_ptr<mtproto::RawConnection>> promise,
-            ActorShared<> parent)
-      : promise_(std::move(promise)), parent_(std::move(parent)) {
-    ping_connection_ = make_unique<mtproto::PingConnection>(std::move(raw_connection), 2);
-  }
-
- private:
-  unique_ptr<mtproto::PingConnection> ping_connection_;
-  Promise<unique_ptr<mtproto::RawConnection>> promise_;
-  ActorShared<> parent_;
-
-  void start_up() override {
-    Scheduler::subscribe(ping_connection_->get_poll_info().extract_pollable_fd(this));
-    set_timeout_in(10);
-    yield();
-  }
-
-  void hangup() override {
-    finish(Status::Error("Cancelled"));
-    stop();
-  }
-
-  void tear_down() override {
-    finish(Status::OK());
-  }
-
-  void loop() override {
-    auto status = ping_connection_->flush();
-    if (status.is_error()) {
-      finish(std::move(status));
-      return stop();
-    }
-    if (ping_connection_->was_pong()) {
-      finish(Status::OK());
-      return stop();
-    }
-  }
-
-  void timeout_expired() override {
-    finish(Status::Error("Pong timeout expired"));
-    stop();
-  }
-
-  void finish(Status status) {
-    auto raw_connection = ping_connection_->move_as_raw_connection();
-    if (!raw_connection) {
-      CHECK(!promise_);
-      return;
-    }
-    Scheduler::unsubscribe(raw_connection->get_poll_info().get_pollable_fd_ref());
-    if (promise_) {
-      if (status.is_error()) {
-        if (raw_connection->stats_callback()) {
-          raw_connection->stats_callback()->on_error();
-        }
-        raw_connection->close();
-        promise_.set_error(std::move(status));
-      } else {
-        raw_connection->rtt_ = ping_connection_->rtt();
-        if (raw_connection->stats_callback()) {
-          raw_connection->stats_callback()->on_pong();
-        }
-        promise_.set_value(std::move(raw_connection));
-      }
-    } else {
-      if (raw_connection->stats_callback()) {
-        raw_connection->stats_callback()->on_error();
-      }
-      raw_connection->close();
-    }
-  }
-};
-
 }  // namespace detail
-
-class ConnectionCreator::ProxyInfo {
- public:
-  ProxyInfo(Proxy *proxy, IPAddress ip_address) : proxy_(proxy), ip_address_(std::move(ip_address)) {
-  }
-  bool use_proxy() const {
-    return proxy_ != nullptr;
-  }
-  Proxy::Type proxy_type() const {
-    return proxy_ == nullptr ? Proxy::Type::None : proxy_->type();
-  }
-  bool use_socks5_proxy() const {
-    return proxy_type() == Proxy::Type::Socks5;
-  }
-  bool use_http_tcp_proxy() const {
-    return proxy_type() == Proxy::Type::HttpTcp;
-  }
-  bool use_http_caching_proxy() const {
-    return proxy_type() == Proxy::Type::HttpCaching;
-  }
-  bool use_mtproto_proxy() const {
-    return proxy_type() == Proxy::Type::Mtproto;
-  }
-  const Proxy &proxy() const {
-    CHECK(use_proxy());
-    return *proxy_;
-  }
-  const IPAddress &ip_address() const {
-    return ip_address_;
-  }
-
- private:
-  Proxy *proxy_;
-  IPAddress ip_address_;
-};
-
-template <class StorerT>
-void Proxy::store(StorerT &storer) const {
-  using td::store;
-  store(type_, storer);
-  if (type_ == Proxy::Type::Socks5 || type_ == Proxy::Type::HttpTcp || type_ == Proxy::Type::HttpCaching) {
-    store(server_, storer);
-    store(port_, storer);
-    store(user_, storer);
-    store(password_, storer);
-  } else if (type_ == Proxy::Type::Mtproto) {
-    store(server_, storer);
-    store(port_, storer);
-    store(secret_, storer);
-  } else {
-    CHECK(type_ == Proxy::Type::None);
-  }
-}
-
-template <class ParserT>
-void Proxy::parse(ParserT &parser) {
-  using td::parse;
-  parse(type_, parser);
-  if (type_ == Proxy::Type::Socks5 || type_ == Proxy::Type::HttpTcp || type_ == Proxy::Type::HttpCaching) {
-    parse(server_, parser);
-    parse(port_, parser);
-    parse(user_, parser);
-    parse(password_, parser);
-  } else if (type_ == Proxy::Type::Mtproto) {
-    parse(server_, parser);
-    parse(port_, parser);
-    parse(secret_, parser);
-  } else {
-    LOG_CHECK(type_ == Proxy::Type::None) << static_cast<int32>(type_);
-  }
-}
-
-StringBuilder &operator<<(StringBuilder &string_builder, const Proxy &proxy) {
-  switch (proxy.type()) {
-    case Proxy::Type::Socks5:
-      return string_builder << "ProxySocks5 " << proxy.server() << ":" << proxy.port();
-    case Proxy::Type::HttpTcp:
-      return string_builder << "ProxyHttpTcp " << proxy.server() << ":" << proxy.port();
-    case Proxy::Type::HttpCaching:
-      return string_builder << "ProxyHttpCaching " << proxy.server() << ":" << proxy.port();
-    case Proxy::Type::Mtproto:
-      return string_builder << "ProxyMtproto " << proxy.server() << ":" << proxy.port() << "/" << proxy.secret();
-    case Proxy::Type::None:
-      return string_builder << "ProxyEmpty";
-    default:
-      UNREACHABLE();
-      return string_builder;
-  }
-}
 
 ConnectionCreator::ClientInfo::ClientInfo() {
   flood_control.add_limit(1, 1);
@@ -263,6 +102,25 @@ ConnectionCreator::ClientInfo::ClientInfo() {
   mtproto_error_flood_control.add_limit(1, 1);
   mtproto_error_flood_control.add_limit(4, 2);
   mtproto_error_flood_control.add_limit(8, 3);
+}
+
+int64 ConnectionCreator::ClientInfo::extract_session_id() {
+  if (!session_ids_.empty()) {
+    auto res = *session_ids_.begin();
+    session_ids_.erase(session_ids_.begin());
+    return res;
+  }
+  int64 res = 0;
+  while (res == 0) {
+    res = Random::secure_int64();
+  }
+  return res;
+}
+
+void ConnectionCreator::ClientInfo::add_session_id(int64 session_id) {
+  if (session_id != 0) {
+    session_ids_.insert(session_id);
+  }
 }
 
 ConnectionCreator::ConnectionCreator(ActorShared<> parent) : parent_(std::move(parent)) {
@@ -283,56 +141,11 @@ void ConnectionCreator::set_net_stats_callback(std::shared_ptr<NetStatsCallback>
 void ConnectionCreator::add_proxy(int32 old_proxy_id, string server, int32 port, bool enable,
                                   td_api::object_ptr<td_api::ProxyType> proxy_type,
                                   Promise<td_api::object_ptr<td_api::proxy>> promise) {
-  if (proxy_type == nullptr) {
-    return promise.set_error(Status::Error(400, "Proxy type should not be empty"));
+  auto r_proxy = Proxy::from_td_api(std::move(server), port, proxy_type.get());
+  if (r_proxy.is_error()) {
+    return promise.set_error(r_proxy.move_as_error());
   }
-  if (server.empty()) {
-    return promise.set_error(Status::Error(400, "Server name can't be empty"));
-  }
-  if (port <= 0 || port > 65535) {
-    return promise.set_error(Status::Error(400, "Wrong port number"));
-  }
-
-  auto is_secret_supported = [](Slice secret) {
-    if (secret.size() == 32) {
-      return true;
-    }
-    if (secret.size() == 34) {
-      return begins_with(secret, "dd");
-    }
-    return false;
-  };
-
-  Proxy new_proxy;
-  switch (proxy_type->get_id()) {
-    case td_api::proxyTypeSocks5::ID: {
-      auto type = td_api::move_object_as<td_api::proxyTypeSocks5>(proxy_type);
-      new_proxy = Proxy::socks5(server, port, type->username_, type->password_);
-      break;
-    }
-    case td_api::proxyTypeHttp::ID: {
-      auto type = td_api::move_object_as<td_api::proxyTypeHttp>(proxy_type);
-      if (type->http_only_) {
-        new_proxy = Proxy::http_caching(server, port, type->username_, type->password_);
-      } else {
-        new_proxy = Proxy::http_tcp(server, port, type->username_, type->password_);
-      }
-      break;
-    }
-    case td_api::proxyTypeMtproto::ID: {
-      auto type = td_api::move_object_as<td_api::proxyTypeMtproto>(proxy_type);
-      if (hex_decode(type->secret_).is_error()) {
-        return promise.set_error(Status::Error(400, "Wrong secret"));
-      }
-      if (!is_secret_supported(type->secret_)) {
-        return promise.set_error(Status::Error(400, "Unsupported secret"));
-      }
-      new_proxy = Proxy::mtproto(server, port, type->secret_);
-      break;
-    }
-    default:
-      UNREACHABLE();
-  }
+  auto new_proxy = r_proxy.move_as_ok();
   if (old_proxy_id >= 0) {
     if (proxies_.count(old_proxy_id) == 0) {
       return promise.set_error(Status::Error(400, "Proxy not found"));
@@ -451,7 +264,7 @@ void ConnectionCreator::get_proxy_link(int32 proxy_id, Promise<string> promise) 
     }
   } else {
     url += "&secret=";
-    url += url_encode(proxy.secret());
+    url += proxy.secret().get_encoded_secret();
   }
   promise.set_value(std::move(url));
 }
@@ -482,8 +295,8 @@ ActorId<GetHostByNameActor> ConnectionCreator::get_dns_resolver() {
 }
 
 void ConnectionCreator::ping_proxy(int32 proxy_id, Promise<double> promise) {
+  CHECK(!close_flag_);
   if (proxy_id == 0) {
-    ProxyInfo proxy{nullptr, IPAddress()};
     auto main_dc_id = G()->net_query_dispatcher().main_dc_id();
     bool prefer_ipv6 = G()->shared_config().get_option_boolean("prefer_ipv6");
     auto infos = dc_options_set_.find_all_connections(main_dc_id, false, false, prefer_ipv6, false);
@@ -502,7 +315,7 @@ void ConnectionCreator::ping_proxy(int32 proxy_id, Promise<double> promise) {
     request.result = Status::Error(400, "Failed to ping");
 
     for (auto &info : infos) {
-      auto r_transport_type = get_transport_type(ProxyInfo{nullptr, IPAddress()}, info);
+      auto r_transport_type = get_transport_type(Proxy(), info);
       if (r_transport_type.is_error()) {
         LOG(ERROR) << r_transport_type.error();
         on_ping_main_dc_result(token, r_transport_type.move_as_error());
@@ -535,7 +348,7 @@ void ConnectionCreator::ping_proxy(int32 proxy_id, Promise<double> promise) {
                PromiseCreator::lambda([actor_id = actor_id(this), promise = std::move(promise),
                                        proxy_id](Result<IPAddress> result) mutable {
                  if (result.is_error()) {
-                   return promise.set_error(Status::Error(400, result.error().message()));
+                   return promise.set_error(Status::Error(400, result.error().public_message()));
                  }
                  send_closure(actor_id, &ConnectionCreator::ping_proxy_resolved, proxy_id, result.move_as_ok(),
                               std::move(promise));
@@ -547,54 +360,31 @@ void ConnectionCreator::ping_proxy_resolved(int32 proxy_id, IPAddress ip_address
   if (it == proxies_.end()) {
     return promise.set_error(Status::Error(400, "Unknown proxy identifier"));
   }
-  ProxyInfo proxy(&it->second, ip_address);
+  const Proxy &proxy = it->second;
   auto main_dc_id = G()->net_query_dispatcher().main_dc_id();
   FindConnectionExtra extra;
-  auto r_socket_fd = find_connection(proxy, main_dc_id, false, extra);
+  auto r_socket_fd = find_connection(proxy, ip_address, main_dc_id, false, extra);
   if (r_socket_fd.is_error()) {
-    return promise.set_error(Status::Error(400, r_socket_fd.error().message()));
+    return promise.set_error(Status::Error(400, r_socket_fd.error().public_message()));
   }
   auto socket_fd = r_socket_fd.move_as_ok();
 
-  auto socket_fd_promise =
+  auto connection_promise =
       PromiseCreator::lambda([promise = std::move(promise), actor_id = actor_id(this),
-                              transport_type = std::move(extra.transport_type)](Result<SocketFd> r_socket_fd) mutable {
-        if (r_socket_fd.is_error()) {
-          return promise.set_error(Status::Error(400, r_socket_fd.error().message()));
+                              transport_type = extra.transport_type](Result<ConnectionData> r_connection_data) mutable {
+        if (r_connection_data.is_error()) {
+          return promise.set_error(Status::Error(400, r_connection_data.error().public_message()));
         }
-        send_closure(actor_id, &ConnectionCreator::ping_proxy_socket_fd, r_socket_fd.move_as_ok(),
+        send_closure(actor_id, &ConnectionCreator::ping_proxy_socket_fd, r_connection_data.move_as_ok().socket_fd,
                      std::move(transport_type), std::move(promise));
       });
   CHECK(proxy.use_proxy());
-  if (proxy.use_socks5_proxy() || proxy.use_http_tcp_proxy()) {
-    class Callback : public TransparentProxy::Callback {
-     public:
-      explicit Callback(Promise<SocketFd> promise) : promise_(std::move(promise)) {
-      }
-      void set_result(Result<SocketFd> result) override {
-        promise_.set_result(std::move(result));
-      }
-      void on_connected() override {
-      }
-
-     private:
-      Promise<SocketFd> promise_;
-    };
-    LOG(INFO) << "Start ping proxy: " << extra.debug_str;
-    auto token = next_token();
-    if (proxy.use_socks5_proxy()) {
-      children_[token] = {
-          false, create_actor<Socks5>("PingSocks5", std::move(socket_fd), extra.mtproto_ip, proxy.proxy().user().str(),
-                                      proxy.proxy().password().str(),
-                                      make_unique<Callback>(std::move(socket_fd_promise)), create_reference(token))};
-    } else {
-      children_[token] = {
-          false, create_actor<HttpProxy>("PingHttpProxy", std::move(socket_fd), extra.mtproto_ip,
-                                         proxy.proxy().user().str(), proxy.proxy().password().str(),
-                                         make_unique<Callback>(std::move(socket_fd_promise)), create_reference(token))};
-    }
-  } else {
-    socket_fd_promise.set_value(std::move(socket_fd));
+  auto token = next_token();
+  auto ref =
+      prepare_connection(std::move(socket_fd), proxy, extra.mtproto_ip, extra.transport_type, "Ping", extra.debug_str,
+                         nullptr, create_reference(token), false, std::move(connection_promise));
+  if (!ref.empty()) {
+    children_[token] = {false, std::move(ref)};
   }
 }
 
@@ -602,17 +392,17 @@ void ConnectionCreator::ping_proxy_socket_fd(SocketFd socket_fd, mtproto::Transp
                                              Promise<double> promise) {
   auto token = next_token();
   auto raw_connection = make_unique<mtproto::RawConnection>(std::move(socket_fd), std::move(transport_type), nullptr);
-  children_[token] = {false, create_actor<detail::PingActor>(
-                                 "PingActor", std::move(raw_connection),
-                                 PromiseCreator::lambda([promise = std::move(promise)](
-                                                            Result<unique_ptr<mtproto::RawConnection>> result) mutable {
-                                   if (result.is_error()) {
-                                     return promise.set_error(Status::Error(400, result.error().message()));
-                                   }
-                                   auto ping_time = result.ok()->rtt_;
-                                   promise.set_value(std::move(ping_time));
-                                 }),
-                                 create_reference(token))};
+  children_[token] = {
+      false, create_ping_actor("", std::move(raw_connection), nullptr,
+                               PromiseCreator::lambda([promise = std::move(promise)](
+                                                          Result<unique_ptr<mtproto::RawConnection>> result) mutable {
+                                 if (result.is_error()) {
+                                   return promise.set_error(Status::Error(400, result.error().public_message()));
+                                 }
+                                 auto ping_time = result.ok()->rtt_;
+                                 promise.set_value(std::move(ping_time));
+                               }),
+                               create_reference(token))};
 }
 
 void ConnectionCreator::set_active_proxy_id(int32 proxy_id, bool from_binlog) {
@@ -739,7 +529,7 @@ td_api::object_ptr<td_api::proxy> ConnectionCreator::get_proxy_object(int32 prox
       type = make_tl_object<td_api::proxyTypeHttp>(proxy.user().str(), proxy.password().str(), true);
       break;
     case Proxy::Type::Mtproto:
-      type = make_tl_object<td_api::proxyTypeMtproto>(proxy.secret().str());
+      type = make_tl_object<td_api::proxyTypeMtproto>(proxy.secret().get_encoded_secret());
       break;
     default:
       UNREACHABLE();
@@ -805,7 +595,8 @@ void ConnectionCreator::on_mtproto_error(size_t hash) {
 }
 
 void ConnectionCreator::request_raw_connection(DcId dc_id, bool allow_media_only, bool is_media,
-                                               Promise<unique_ptr<mtproto::RawConnection>> promise, size_t hash) {
+                                               Promise<unique_ptr<mtproto::RawConnection>> promise, size_t hash,
+                                               unique_ptr<mtproto::AuthData> auth_data) {
   auto &client = clients_[hash];
   if (!client.inited) {
     client.inited = true;
@@ -819,6 +610,8 @@ void ConnectionCreator::request_raw_connection(DcId dc_id, bool allow_media_only
     CHECK(client.allow_media_only == allow_media_only);
     CHECK(client.is_media == is_media);
   }
+  client.auth_data = std::move(auth_data);
+  client.auth_data_generation++;
   VLOG(connections) << "Request connection for " << tag("client", format::as_hex(client.hash)) << " to " << dc_id << " "
                     << tag("allow_media_only", allow_media_only);
   client.queries.push_back(std::move(promise));
@@ -826,19 +619,36 @@ void ConnectionCreator::request_raw_connection(DcId dc_id, bool allow_media_only
   client_loop(client);
 }
 
-void ConnectionCreator::request_raw_connection_by_ip(IPAddress ip_address,
+void ConnectionCreator::request_raw_connection_by_ip(IPAddress ip_address, mtproto::TransportType transport_type,
                                                      Promise<unique_ptr<mtproto::RawConnection>> promise) {
   auto r_socket_fd = SocketFd::open(ip_address);
   if (r_socket_fd.is_error()) {
     return promise.set_error(r_socket_fd.move_as_error());
   }
-  auto raw_connection = make_unique<mtproto::RawConnection>(
-      r_socket_fd.move_as_ok(), mtproto::TransportType{mtproto::TransportType::ObfuscatedTcp, 0, ""}, nullptr);
-  raw_connection->extra_ = network_generation_;
-  promise.set_value(std::move(raw_connection));
+  auto socket_fd = r_socket_fd.move_as_ok();
+
+  auto connection_promise = PromiseCreator::lambda(
+      [promise = std::move(promise), actor_id = actor_id(this), transport_type,
+       network_generation = network_generation_](Result<ConnectionData> r_connection_data) mutable {
+        if (r_connection_data.is_error()) {
+          return promise.set_error(Status::Error(400, r_connection_data.error().public_message()));
+        }
+        auto raw_connection =
+            make_unique<mtproto::RawConnection>(r_connection_data.move_as_ok().socket_fd, transport_type, nullptr);
+        raw_connection->extra_ = network_generation;
+        promise.set_value(std::move(raw_connection));
+      });
+
+  auto token = next_token();
+  auto ref = prepare_connection(std::move(socket_fd), Proxy(), IPAddress(), transport_type, "Raw",
+                                PSTRING() << "to IP address " << ip_address, nullptr, create_reference(token), false,
+                                std::move(connection_promise));
+  if (!ref.empty()) {
+    children_[token] = {false, std::move(ref)};
+  }
 }
 
-Result<mtproto::TransportType> ConnectionCreator::get_transport_type(const ProxyInfo &proxy,
+Result<mtproto::TransportType> ConnectionCreator::get_transport_type(const Proxy &proxy,
                                                                      const DcOptionsSet::ConnectionInfo &info) {
   int32 int_dc_id = info.option->get_dc_id().get_raw_id();
   if (G()->is_test_dc()) {
@@ -847,32 +657,31 @@ Result<mtproto::TransportType> ConnectionCreator::get_transport_type(const Proxy
   int16 raw_dc_id = narrow_cast<int16>(info.option->is_media_only() ? -int_dc_id : int_dc_id);
 
   if (proxy.use_mtproto_proxy()) {
-    TRY_RESULT(secret, hex_decode(proxy.proxy().secret()));
-    return mtproto::TransportType{mtproto::TransportType::ObfuscatedTcp, raw_dc_id, std::move(secret)};
+    return mtproto::TransportType{mtproto::TransportType::ObfuscatedTcp, raw_dc_id, proxy.secret()};
   }
   if (proxy.use_http_caching_proxy()) {
     CHECK(info.option != nullptr);
     string proxy_authorization;
-    if (!proxy.proxy().user().empty() || !proxy.proxy().password().empty()) {
-      proxy_authorization =
-          "|basic " + td::base64_encode(PSLICE() << proxy.proxy().user() << ':' << proxy.proxy().password());
+    if (!proxy.user().empty() || !proxy.password().empty()) {
+      proxy_authorization = "|basic " + td::base64_encode(PSLICE() << proxy.user() << ':' << proxy.password());
     }
-    return mtproto::TransportType{mtproto::TransportType::Http, 0,
-                                  PSTRING() << info.option->get_ip_address().get_ip_str() << proxy_authorization};
+    return mtproto::TransportType{
+        mtproto::TransportType::Http, 0,
+        mtproto::ProxySecret::from_raw(PSTRING() << info.option->get_ip_address().get_ip_str() << proxy_authorization)};
   }
 
   if (info.use_http) {
-    return mtproto::TransportType{mtproto::TransportType::Http, 0, ""};
+    return mtproto::TransportType{mtproto::TransportType::Http, 0, mtproto::ProxySecret()};
   } else {
-    return mtproto::TransportType{mtproto::TransportType::ObfuscatedTcp, raw_dc_id, info.option->get_secret().str()};
+    return mtproto::TransportType{mtproto::TransportType::ObfuscatedTcp, raw_dc_id, info.option->get_secret()};
   }
 }
 
-Result<SocketFd> ConnectionCreator::find_connection(const ProxyInfo &proxy, DcId dc_id, bool allow_media_only,
-                                                    FindConnectionExtra &extra) {
+Result<SocketFd> ConnectionCreator::find_connection(const Proxy &proxy, const IPAddress &proxy_ip_address, DcId dc_id,
+                                                    bool allow_media_only, FindConnectionExtra &extra) {
   extra.debug_str = PSTRING() << "Failed to find valid IP for " << dc_id;
   bool prefer_ipv6 =
-      G()->shared_config().get_option_boolean("prefer_ipv6") || (proxy.use_proxy() && proxy.ip_address().is_ipv6());
+      G()->shared_config().get_option_boolean("prefer_ipv6") || (proxy.use_proxy() && proxy_ip_address.is_ipv6());
   bool only_http = proxy.use_http_caching_proxy();
   TRY_RESULT(info, dc_options_set_.find_connection(
                        dc_id, allow_media_only, proxy.use_proxy() && proxy.use_socks5_proxy(), prefer_ipv6, only_http));
@@ -884,10 +693,10 @@ Result<SocketFd> ConnectionCreator::find_connection(const ProxyInfo &proxy, DcId
                               << (info.use_http ? " over HTTP" : "");
 
   if (proxy.use_mtproto_proxy()) {
-    extra.debug_str = PSTRING() << "Mtproto " << proxy.ip_address() << extra.debug_str;
+    extra.debug_str = PSTRING() << "Mtproto " << proxy_ip_address << extra.debug_str;
 
     LOG(INFO) << "Create: " << extra.debug_str;
-    return SocketFd::open(proxy.ip_address());
+    return SocketFd::open(proxy_ip_address);
   }
 
   extra.check_mode |= info.should_check;
@@ -895,13 +704,90 @@ Result<SocketFd> ConnectionCreator::find_connection(const ProxyInfo &proxy, DcId
   if (proxy.use_proxy()) {
     extra.mtproto_ip = info.option->get_ip_address();
     extra.debug_str = PSTRING() << (proxy.use_socks5_proxy() ? "Socks5" : (only_http ? "HTTP_ONLY" : "HTTP_TCP")) << ' '
-                                << proxy.ip_address() << " --> " << extra.mtproto_ip << extra.debug_str;
+                                << proxy_ip_address << " --> " << extra.mtproto_ip << extra.debug_str;
     LOG(INFO) << "Create: " << extra.debug_str;
-    return SocketFd::open(proxy.ip_address());
+    return SocketFd::open(proxy_ip_address);
   } else {
     extra.debug_str = PSTRING() << info.option->get_ip_address() << extra.debug_str;
     LOG(INFO) << "Create: " << extra.debug_str;
     return SocketFd::open(info.option->get_ip_address());
+  }
+}
+
+ActorOwn<> ConnectionCreator::prepare_connection(SocketFd socket_fd, const Proxy &proxy, const IPAddress &mtproto_ip,
+                                                 mtproto::TransportType transport_type, Slice actor_name_prefix,
+                                                 Slice debug_str,
+                                                 unique_ptr<mtproto::RawConnection::StatsCallback> stats_callback,
+                                                 ActorShared<> parent, bool use_connection_token,
+                                                 Promise<ConnectionData> promise) {
+  if (proxy.use_socks5_proxy() || proxy.use_http_tcp_proxy() || transport_type.secret.emulate_tls()) {
+    VLOG(connections) << "Create new transparent proxy connection " << debug_str;
+    class Callback : public TransparentProxy::Callback {
+     public:
+      explicit Callback(Promise<ConnectionData> promise,
+                        unique_ptr<mtproto::RawConnection::StatsCallback> stats_callback, bool use_connection_token)
+          : promise_(std::move(promise))
+          , stats_callback_(std::move(stats_callback))
+          , use_connection_token_(use_connection_token) {
+      }
+      void set_result(Result<SocketFd> result) override {
+        if (result.is_error()) {
+          if (use_connection_token_) {
+            connection_token_ = StateManager::ConnectionToken();
+          }
+          if (was_connected_ && stats_callback_) {
+            stats_callback_->on_error();
+          }
+          promise_.set_error(Status::Error(400, result.error().public_message()));
+        } else {
+          ConnectionData data;
+          data.socket_fd = result.move_as_ok();
+          data.connection_token = std::move(connection_token_);
+          data.stats_callback = std::move(stats_callback_);
+          promise_.set_value(std::move(data));
+        }
+      }
+      void on_connected() override {
+        if (use_connection_token_) {
+          connection_token_ = StateManager::connection_proxy(G()->state_manager());
+        }
+        was_connected_ = true;
+      }
+
+     private:
+      Promise<ConnectionData> promise_;
+      StateManager::ConnectionToken connection_token_;
+      bool was_connected_{false};
+      unique_ptr<mtproto::RawConnection::StatsCallback> stats_callback_;
+      bool use_connection_token_;
+    };
+    LOG(INFO) << "Start " << (proxy.use_socks5_proxy() ? "Socks5" : (proxy.use_http_tcp_proxy() ? "HTTP" : "TLS"))
+              << ": " << debug_str;
+    auto callback = make_unique<Callback>(std::move(promise), std::move(stats_callback), use_connection_token);
+    if (proxy.use_socks5_proxy()) {
+      return ActorOwn<>(create_actor<Socks5>(PSLICE() << actor_name_prefix << "Socks5", std::move(socket_fd),
+                                             mtproto_ip, proxy.user().str(), proxy.password().str(),
+                                             std::move(callback), std::move(parent)));
+    } else if (proxy.use_http_tcp_proxy()) {
+      return ActorOwn<>(create_actor<HttpProxy>(PSLICE() << actor_name_prefix << "HttpProxy", std::move(socket_fd),
+                                                mtproto_ip, proxy.user().str(), proxy.password().str(),
+                                                std::move(callback), std::move(parent)));
+    } else if (transport_type.secret.emulate_tls()) {
+      return ActorOwn<>(create_actor<mtproto::TlsInit>(
+          PSLICE() << actor_name_prefix << "TlsInit", std::move(socket_fd), transport_type.secret.get_domain(),
+          transport_type.secret.get_proxy_secret().str(), std::move(callback), std::move(parent),
+          G()->get_dns_time_difference()));
+    } else {
+      UNREACHABLE();
+    }
+  } else {
+    VLOG(connections) << "Create new direct connection " << debug_str;
+
+    ConnectionData data;
+    data.socket_fd = std::move(socket_fd);
+    data.stats_callback = std::move(stats_callback);
+    promise.set_result(std::move(data));
+    return {};
   }
 }
 
@@ -916,9 +802,10 @@ void ConnectionCreator::client_loop(ClientInfo &client) {
     return;
   }
 
-  ProxyInfo proxy{active_proxy_id_ == 0 ? nullptr : &proxies_[active_proxy_id_], proxy_ip_address_};
-  if (proxy.use_proxy() && !proxy.ip_address().is_valid()) {
-    VLOG(connections) << "Exit client_loop, because there is no valid IP address for proxy: " << proxy.ip_address();
+  Proxy proxy = active_proxy_id_ == 0 ? Proxy() : proxies_[active_proxy_id_];
+
+  if (proxy.use_proxy() && !proxy_ip_address_.is_valid()) {
+    VLOG(connections) << "Exit client_loop, because there is no valid IP address for proxy: " << proxy_ip_address_;
     return;
   }
 
@@ -986,7 +873,7 @@ void ConnectionCreator::client_loop(ClientInfo &client) {
     // Create new RawConnection
     // sync part
     FindConnectionExtra extra;
-    auto r_socket_fd = find_connection(proxy, client.dc_id, client.allow_media_only, extra);
+    auto r_socket_fd = find_connection(proxy, proxy_ip_address_, client.dc_id, client.allow_media_only, extra);
     check_mode |= extra.check_mode;
     if (r_socket_fd.is_error()) {
       LOG(WARNING) << extra.debug_str << ": " << r_socket_fd.error();
@@ -1024,59 +911,12 @@ void ConnectionCreator::client_loop(ClientInfo &client) {
     auto stats_callback =
         td::make_unique<detail::StatsCallback>(client.is_media ? media_net_stats_callback_ : common_net_stats_callback_,
                                                actor_id(this), client.hash, extra.stat);
-
-    if (proxy.use_socks5_proxy() || proxy.use_http_tcp_proxy()) {
-      VLOG(connections) << "In client_loop: create new transparent proxy connection " << extra.debug_str;
-      class Callback : public TransparentProxy::Callback {
-       public:
-        explicit Callback(Promise<ConnectionData> promise, unique_ptr<detail::StatsCallback> stats_callback)
-            : promise_(std::move(promise)), stats_callback_(std::move(stats_callback)) {
-        }
-        void set_result(Result<SocketFd> result) override {
-          if (result.is_error()) {
-            connection_token_ = StateManager::ConnectionToken();
-            if (was_connected_) {
-              stats_callback_->on_error();
-            }
-            promise_.set_error(result.move_as_error());
-          } else {
-            ConnectionData data;
-            data.socket_fd = result.move_as_ok();
-            data.connection_token = std::move(connection_token_);
-            data.stats_callback = std::move(stats_callback_);
-            promise_.set_value(std::move(data));
-          }
-        }
-        void on_connected() override {
-          connection_token_ = StateManager::connection_proxy(G()->state_manager());
-          was_connected_ = true;
-        }
-
-       private:
-        Promise<ConnectionData> promise_;
-        StateManager::ConnectionToken connection_token_;
-        bool was_connected_{false};
-        unique_ptr<detail::StatsCallback> stats_callback_;
-      };
-      LOG(INFO) << "Start " << (proxy.use_socks5_proxy() ? "Socks5" : "HTTP") << ": " << extra.debug_str;
-      auto token = next_token();
-      auto callback = td::make_unique<Callback>(std::move(promise), std::move(stats_callback));
-      if (proxy.use_socks5_proxy()) {
-        children_[token] = {
-            true, create_actor<Socks5>("Socks5", std::move(socket_fd), extra.mtproto_ip, proxy.proxy().user().str(),
-                                       proxy.proxy().password().str(), std::move(callback), create_reference(token))};
-      } else {
-        children_[token] = {true, create_actor<HttpProxy>("HttpProxy", std::move(socket_fd), extra.mtproto_ip,
-                                                          proxy.proxy().user().str(), proxy.proxy().password().str(),
-                                                          std::move(callback), create_reference(token))};
-      }
-    } else {
-      VLOG(connections) << "In client_loop: create new direct connection " << extra.debug_str;
-
-      ConnectionData data;
-      data.socket_fd = std::move(socket_fd);
-      data.stats_callback = std::move(stats_callback);
-      promise.set_result(std::move(data));
+    auto token = next_token();
+    auto ref = prepare_connection(std::move(socket_fd), proxy, extra.mtproto_ip, extra.transport_type, Slice(),
+                                  extra.debug_str, std::move(stats_callback), create_reference(token), true,
+                                  std::move(promise));
+    if (!ref.empty()) {
+      children_[token] = {true, std::move(ref)};
     }
   }
 }
@@ -1084,16 +924,31 @@ void ConnectionCreator::client_loop(ClientInfo &client) {
 void ConnectionCreator::client_create_raw_connection(Result<ConnectionData> r_connection_data, bool check_mode,
                                                      mtproto::TransportType transport_type, size_t hash,
                                                      string debug_str, uint32 network_generation) {
-  auto promise = PromiseCreator::lambda([actor_id = actor_id(this), hash, check_mode,
+  unique_ptr<mtproto::AuthData> auth_data;
+  uint64 auth_data_generation{0};
+  int64 session_id{0};
+  if (check_mode) {
+    auto it = clients_.find(hash);
+    CHECK(it != clients_.end());
+    const auto &auth_data_ptr = it->second.auth_data;
+    if (auth_data_ptr && auth_data_ptr->use_pfs() && auth_data_ptr->has_auth_key(Time::now_cached())) {
+      auth_data = make_unique<mtproto::AuthData>(*auth_data_ptr);
+      auth_data_generation = it->second.auth_data_generation;
+      session_id = it->second.extract_session_id();
+      auth_data->set_session_id(session_id);
+    }
+  }
+  auto promise = PromiseCreator::lambda([actor_id = actor_id(this), hash, check_mode, auth_data_generation, session_id,
                                          debug_str](Result<unique_ptr<mtproto::RawConnection>> result) mutable {
     if (result.is_ok()) {
       VLOG(connections) << "Ready connection (" << (check_mode ? "" : "un") << "checked) " << result.ok().get() << ' '
-                        << debug_str;
+                        << tag("rtt", format::as_time(result.ok()->rtt_)) << ' ' << debug_str;
     } else {
       VLOG(connections) << "Failed connection (" << (check_mode ? "" : "un") << "checked) " << result.error() << ' '
                         << debug_str;
     }
-    send_closure(std::move(actor_id), &ConnectionCreator::client_add_connection, hash, std::move(result), check_mode);
+    send_closure(std::move(actor_id), &ConnectionCreator::client_add_connection, hash, std::move(result), check_mode,
+                 auth_data_generation, session_id);
   });
 
   if (r_connection_data.is_error()) {
@@ -1109,11 +964,10 @@ void ConnectionCreator::client_create_raw_connection(Result<ConnectionData> r_co
   raw_connection->debug_str_ = debug_str;
 
   if (check_mode) {
-    VLOG(connections) << "Start check: " << debug_str;
+    VLOG(connections) << "Start check: " << debug_str << " " << (auth_data ? "with" : "without") << " auth data";
     auto token = next_token();
-    children_[token] = {
-        true, create_actor<detail::PingActor>(PSLICE() << "PingActor<" << debug_str << ">", std::move(raw_connection),
-                                              std::move(promise), create_reference(token))};
+    children_[token] = {true, create_ping_actor(debug_str, std::move(raw_connection), std::move(auth_data),
+                                                std::move(promise), create_reference(token))};
   } else {
     promise.set_value(std::move(raw_connection));
   }
@@ -1129,8 +983,9 @@ void ConnectionCreator::client_set_timeout_at(ClientInfo &client, double wakeup_
 }
 
 void ConnectionCreator::client_add_connection(size_t hash, Result<unique_ptr<mtproto::RawConnection>> r_raw_connection,
-                                              bool check_flag) {
+                                              bool check_flag, uint64 auth_data_generation, int64 session_id) {
   auto &client = clients_[hash];
+  client.add_session_id(session_id);
   CHECK(client.pending_connections > 0);
   client.pending_connections--;
   if (check_flag) {
@@ -1142,6 +997,13 @@ void ConnectionCreator::client_add_connection(size_t hash, Result<unique_ptr<mtp
                       << tag("client", format::as_hex(hash));
     client.backoff.clear();
     client.ready_connections.push_back(std::make_pair(r_raw_connection.move_as_ok(), Time::now_cached()));
+  } else {
+    if (r_raw_connection.error().code() == -404 && client.auth_data &&
+        client.auth_data_generation == auth_data_generation) {
+      VLOG(connections) << "Drop auth data from " << tag("client", format::as_hex(hash));
+      client.auth_data = nullptr;
+      client.auth_data_generation++;
+    }
   }
   client_loop(client);
 }
@@ -1425,6 +1287,7 @@ void ConnectionCreator::on_result(NetQueryPtr query) {
     }
     if (res.error().message() == "BOT_METHOD_INVALID") {
       get_proxy_info_timestamp_ = Timestamp::in(30 * 86400);
+      return;
     } else {
       LOG(ERROR) << "Receive error for getProxyData: " << res.error();
       return schedule_get_proxy_info(60);
@@ -1517,7 +1380,7 @@ void ConnectionCreator::on_ping_main_dc_result(uint64 token, Result<double> resu
 
   if (--request.left_queries == 0) {
     if (request.result.is_error()) {
-      request.promise.set_error(Status::Error(400, request.result.error().message()));
+      request.promise.set_error(Status::Error(400, request.result.error().public_message()));
     } else {
       request.promise.set_value(request.result.move_as_ok());
     }

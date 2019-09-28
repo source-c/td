@@ -14,6 +14,7 @@
 
 namespace td {
 namespace mtproto {
+
 HandshakeActor::HandshakeActor(unique_ptr<AuthKeyHandshake> handshake, unique_ptr<RawConnection> raw_connection,
                                unique_ptr<AuthKeyHandshakeContext> context, double timeout,
                                Promise<unique_ptr<RawConnection>> raw_connection_promise,
@@ -54,7 +55,7 @@ void HandshakeActor::return_connection(Status status) {
     CHECK(!raw_connection_promise_);
     return;
   }
-  if (status.is_error()) {
+  if (status.is_error() && !raw_connection->debug_str_.empty()) {
     status = Status::Error(status.code(), PSLICE() << status.message() << " : " << raw_connection->debug_str_);
   }
   Scheduler::unsubscribe(raw_connection->get_poll_info().get_pollable_fd_ref());
@@ -86,5 +87,6 @@ void HandshakeActor::return_handshake() {
   }
   handshake_promise_.set_value(std::move(handshake_));
 }
+
 }  // namespace mtproto
 }  // namespace td

@@ -83,7 +83,7 @@ struct AesCtrEncryptionEvent {
   void parse(ParserT &&parser) {
     using td::parse;
     BEGIN_PARSE_FLAGS();
-    END_PARSE_FLAGS_GENERIC();
+    END_PARSE_FLAGS();
     parse(key_salt_, parser);
     parse(iv_, parser);
     parse(key_hash_, parser);
@@ -445,7 +445,9 @@ void Binlog::update_read_encryption() {
   CHECK(binlog_reader_ptr_);
   switch (encryption_type_) {
     case EncryptionType::None: {
-      binlog_reader_ptr_->set_input(&buffer_reader_, false, fd_.get_size());
+      auto r_file_size = fd_.get_size();
+      r_file_size.ensure();
+      binlog_reader_ptr_->set_input(&buffer_reader_, false, r_file_size.ok());
       byte_flow_flag_ = false;
       break;
     }
@@ -456,7 +458,9 @@ void Binlog::update_read_encryption() {
       byte_flow_sink_ = ByteFlowSink();
       byte_flow_source_ >> aes_xcode_byte_flow_ >> byte_flow_sink_;
       byte_flow_flag_ = true;
-      binlog_reader_ptr_->set_input(byte_flow_sink_.get_output(), true, fd_.get_size());
+      auto r_file_size = fd_.get_size();
+      r_file_size.ensure();
+      binlog_reader_ptr_->set_input(byte_flow_sink_.get_output(), true, r_file_size.ok());
       break;
     }
   }
@@ -549,7 +553,7 @@ Status Binlog::load_binlog(const Callback &callback, const Callback &debug_callb
     }
   });
 
-  auto fd_size = fd_.get_size();
+  TRY_RESULT(fd_size, fd_.get_size());
   if (offset != fd_size) {
     LOG(ERROR) << "Truncate " << tag("path", path_) << tag("old_size", fd_size) << tag("new_size", offset);
     fd_.seek(offset).ensure();
@@ -576,7 +580,7 @@ void Binlog::update_encryption(Slice key, Slice iv) {
   as_slice(aes_ctr_key_).copy_from(key);
   UInt128 aes_ctr_iv;
   as_slice(aes_ctr_iv).copy_from(iv);
-  aes_ctr_state_.init(aes_ctr_key_, aes_ctr_iv);
+  aes_ctr_state_.init(as_slice(aes_ctr_key_), as_slice(aes_ctr_iv));
 }
 
 void Binlog::reset_encryption() {

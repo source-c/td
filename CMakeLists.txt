@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.0.2 FATAL_ERROR)
 
-project(TDLib VERSION 1.4.0 LANGUAGES CXX C)
+project(TDLib VERSION 1.5.0 LANGUAGES CXX C)
 
 if (POLICY CMP0054)
   # do not expand quoted arguments
@@ -343,15 +343,24 @@ set(TDLIB_SOURCE
   td/mtproto/HandshakeActor.cpp
   td/mtproto/HttpTransport.cpp
   td/mtproto/IStreamTransport.cpp
+  td/mtproto/KDF.cpp
+  td/mtproto/Ping.cpp
+  td/mtproto/PingConnection.cpp
+  td/mtproto/ProxySecret.cpp
   td/mtproto/RawConnection.cpp
   td/mtproto/SessionConnection.cpp
   td/mtproto/TcpTransport.cpp
+  td/mtproto/TlsInit.cpp
+  td/mtproto/TlsReaderByteFlow.cpp
   td/mtproto/Transport.cpp
   td/mtproto/utils.cpp
 
   td/telegram/AnimationsManager.cpp
   td/telegram/AudiosManager.cpp
   td/telegram/AuthManager.cpp
+  td/telegram/AutoDownloadSettings.cpp
+  td/telegram/BackgroundManager.cpp
+  td/telegram/BackgroundType.cpp
   td/telegram/CallActor.cpp
   td/telegram/CallDiscardReason.cpp
   td/telegram/CallManager.cpp
@@ -415,6 +424,7 @@ set(TDLIB_SOURCE
   td/telegram/net/NetQueryDelayer.cpp
   td/telegram/net/NetQueryDispatcher.cpp
   td/telegram/net/NetStatsManager.cpp
+  td/telegram/net/Proxy.cpp
   td/telegram/net/PublicRsaKeyShared.cpp
   td/telegram/net/PublicRsaKeyWatchdog.cpp
   td/telegram/net/Session.cpp
@@ -428,6 +438,7 @@ set(TDLIB_SOURCE
   td/telegram/PhoneNumberManager.cpp
   td/telegram/PrivacyManager.cpp
   td/telegram/Photo.cpp
+  td/telegram/PhotoSizeSource.cpp
   td/telegram/PollManager.cpp
   td/telegram/QueryCombiner.cpp
   td/telegram/ReplyMarkup.cpp
@@ -450,7 +461,6 @@ set(TDLIB_SOURCE
   td/telegram/VideoNotesManager.cpp
   td/telegram/VideosManager.cpp
   td/telegram/VoiceNotesManager.cpp
-  td/telegram/WallpaperManager.cpp
   td/telegram/WebPageBlock.cpp
   td/telegram/WebPagesManager.cpp
 
@@ -464,14 +474,19 @@ set(TDLIB_SOURCE
   td/mtproto/HandshakeConnection.h
   td/mtproto/HttpTransport.h
   td/mtproto/IStreamTransport.h
+  td/mtproto/KDF.h
   td/mtproto/NoCryptoStorer.h
   td/mtproto/PacketInfo.h
   td/mtproto/PacketStorer.h
+  td/mtproto/Ping.h
   td/mtproto/PingConnection.h
+  td/mtproto/ProxySecret.h
   td/mtproto/Query.h
   td/mtproto/RawConnection.h
   td/mtproto/SessionConnection.h
   td/mtproto/TcpTransport.h
+  td/mtproto/TlsInit.h
+  td/mtproto/TlsReaderByteFlow.h
   td/mtproto/Transport.h
   td/mtproto/TransportType.h
   td/mtproto/utils.h
@@ -480,6 +495,10 @@ set(TDLIB_SOURCE
   td/telegram/AnimationsManager.h
   td/telegram/AudiosManager.h
   td/telegram/AuthManager.h
+  td/telegram/AutoDownloadSettings.h
+  td/telegram/BackgroundId.h
+  td/telegram/BackgroundManager.h
+  td/telegram/BackgroundType.h
   td/telegram/CallActor.h
   td/telegram/CallDiscardReason.h
   td/telegram/CallId.h
@@ -564,6 +583,7 @@ set(TDLIB_SOURCE
   td/telegram/net/NetQueryDispatcher.h
   td/telegram/net/NetStatsManager.h
   td/telegram/net/NetType.h
+  td/telegram/net/Proxy.h
   td/telegram/net/PublicRsaKeyShared.h
   td/telegram/net/PublicRsaKeyWatchdog.h
   td/telegram/net/Session.h
@@ -582,6 +602,7 @@ set(TDLIB_SOURCE
   td/telegram/Payments.h
   td/telegram/PhoneNumberManager.h
   td/telegram/Photo.h
+  td/telegram/PhotoSizeSource.h
   td/telegram/PollId.h
   td/telegram/PollManager.h
   td/telegram/PrivacyManager.h
@@ -616,7 +637,6 @@ set(TDLIB_SOURCE
   td/telegram/VideoNotesManager.h
   td/telegram/VideosManager.h
   td/telegram/VoiceNotesManager.h
-  td/telegram/WallpaperManager.h
   td/telegram/WebPageBlock.h
   td/telegram/WebPageId.h
   td/telegram/WebPagesManager.h
@@ -624,6 +644,7 @@ set(TDLIB_SOURCE
   td/telegram/AnimationsManager.hpp
   td/telegram/AudiosManager.hpp
   td/telegram/AuthManager.hpp
+  td/telegram/BackgroundType.hpp
   td/telegram/Document.hpp
   td/telegram/DocumentsManager.hpp
   td/telegram/DraftMessage.hpp
@@ -638,6 +659,7 @@ set(TDLIB_SOURCE
   td/telegram/NotificationSettings.hpp
   td/telegram/Payments.hpp
   td/telegram/Photo.hpp
+  td/telegram/PhotoSizeSource.hpp
   td/telegram/PollId.hpp
   td/telegram/PollManager.hpp
   td/telegram/ReplyMarkup.hpp

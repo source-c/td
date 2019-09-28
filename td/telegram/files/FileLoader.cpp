@@ -66,10 +66,12 @@ void FileLoader::update_local_file_location(const LocalFileLocation &local) {
 }
 
 void FileLoader::update_download_offset(int64 offset) {
-  parts_manager_.set_streaming_offset(offset);
-  //TODO: cancel only some queries
-  for (auto &it : part_map_) {
-    it.second.second.reset();  // cancel_query(it.second.second);
+  if (parts_manager_.get_streaming_offset() != offset) {
+    parts_manager_.set_streaming_offset(offset);
+    //TODO: cancel only some queries
+    for (auto &it : part_map_) {
+      it.second.second.reset();  // cancel_query(it.second.second);
+    }
   }
   update_estimated_limit();
   loop();
@@ -95,7 +97,21 @@ void FileLoader::start_up() {
   auto part_size = file_info.part_size;
   auto &ready_parts = file_info.ready_parts;
   auto use_part_count_limit = file_info.use_part_count_limit;
-  auto status = parts_manager_.init(size, expected_size, is_size_final, part_size, ready_parts, use_part_count_limit);
+  bool is_upload = file_info.is_upload;
+
+  // Two cases when FILE_UPLOAD_RESTART will happen
+  // 1. File is ready, size is final. But there are more uploaded parts, than size of a file
+  //pm.init(1, 100000, true, 10, {0, 1, 2}, false, true).ensure_error();
+  // This error is definitely ok, because we are using actual size of file on disk (mtime is checked by somebody
+  // else). And actual size could change arbitrarily.
+  //
+  // 2. size is unknown/zero, size is not final, some parts of file are already uploaded
+  // pm.init(0, 100000, false, 10, {0, 1, 2}, false, true).ensure_error();
+  // This case is more complicated
+  // It means that at some point we got inconsistent state. Like deleted local location, but left partial remote
+  // locaiton untouched. This is completely possible at this point, but probably should be fixed.
+  auto status =
+      parts_manager_.init(size, expected_size, is_size_final, part_size, ready_parts, use_part_count_limit, is_upload);
   if (status.is_error()) {
     on_error(std::move(status));
     stop_flag_ = true;
@@ -279,6 +295,10 @@ void FileLoader::on_result(NetQueryPtr query) {
 }
 
 void FileLoader::on_part_query(Part part, NetQueryPtr query) {
+  if (stop_flag_) {
+    // important for secret files
+    return;
+  }
   auto status = try_on_part_query(part, std::move(query));
   if (status.is_error()) {
     on_error(std::move(status));

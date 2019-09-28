@@ -10,7 +10,6 @@
 #include "td/utils/common.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
-#include "td/utils/UInt.h"
 
 #include <utility>
 
@@ -41,10 +40,5 @@ class PublicRsaKeyInterface {
   virtual Result<std::pair<RSA, int64>> get_rsa(const vector<int64> &fingerprints) = 0;
   virtual void drop_keys() = 0;
 };
-
-/*** KDF ***/
-void KDF(const string &auth_key, const UInt128 &msg_key, int X, UInt256 *aes_key, UInt256 *aes_iv);
-void tmp_KDF(const UInt128 &server_nonce, const UInt256 &new_nonce, UInt256 *tmp_aes_key, UInt256 *tmp_aes_iv);
-void KDF2(Slice auth_key, const UInt128 &msg_key, int X, UInt256 *aes_key, UInt256 *aes_iv);
 
 }  // namespace td

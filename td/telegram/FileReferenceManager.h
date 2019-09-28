@@ -9,14 +9,17 @@
 #include "td/actor/actor.h"
 #include "td/actor/PromiseFuture.h"
 
+#include "td/telegram/BackgroundId.h"
 #include "td/telegram/ChannelId.h"
 #include "td/telegram/ChatId.h"
 #include "td/telegram/files/FileId.h"
 #include "td/telegram/files/FileSourceId.h"
 #include "td/telegram/MessageId.h"
+#include "td/telegram/PhotoSizeSource.h"
 #include "td/telegram/SetWithPosition.h"
 #include "td/telegram/UserId.h"
 
+#include "td/utils/common.h"
 #include "td/utils/logging.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
@@ -39,14 +42,16 @@ class FileReferenceManager : public Actor {
   FileSourceId create_user_photo_file_source(UserId user_id, int64 photo_id);
   FileSourceId create_chat_photo_file_source(ChatId chat_id);
   FileSourceId create_channel_photo_file_source(ChannelId channel_id);
-  FileSourceId create_wallpapers_file_source();
+  // FileSourceId create_wallpapers_file_source();  old wallpapers can't be repaired
   FileSourceId create_web_page_file_source(string url);
   FileSourceId create_saved_animations_file_source();
   FileSourceId create_recent_stickers_file_source(bool is_attached);
   FileSourceId create_favorite_stickers_file_source();
+  FileSourceId create_background_file_source(BackgroundId background_id, int64 access_hash);
 
   using NodeId = FileId;
   void repair_file_reference(NodeId node_id, Promise<> promise);
+  void reload_photo(PhotoSizeSource source, Promise<Unit> promise);
 
   bool add_file_source(NodeId node_id, FileSourceId file_source_id);
 
@@ -109,12 +114,18 @@ class FileReferenceManager : public Actor {
   struct FileSourceRecentStickers {
     bool is_attached;
   };
-  struct FileSourceFavoriteStickers {};
+  struct FileSourceFavoriteStickers {
+    // empty
+  };
+  struct FileSourceBackground {
+    BackgroundId background_id;
+    int64 access_hash;
+  };
 
   // append only
-  using FileSource =
-      Variant<FileSourceMessage, FileSourceUserPhoto, FileSourceChatPhoto, FileSourceChannelPhoto, FileSourceWallpapers,
-              FileSourceWebPage, FileSourceSavedAnimations, FileSourceRecentStickers, FileSourceFavoriteStickers>;
+  using FileSource = Variant<FileSourceMessage, FileSourceUserPhoto, FileSourceChatPhoto, FileSourceChannelPhoto,
+                             FileSourceWallpapers, FileSourceWebPage, FileSourceSavedAnimations,
+                             FileSourceRecentStickers, FileSourceFavoriteStickers, FileSourceBackground>;
   vector<FileSource> file_sources_;
 
   int64 query_generation_{0};

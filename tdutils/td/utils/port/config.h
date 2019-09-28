@@ -19,7 +19,7 @@
 #if TD_LINUX || TD_ANDROID || TD_TIZEN
   #define TD_POLL_EPOLL 1
   #define TD_EVENTFD_LINUX 1
-#elif TD_FREEBSD
+#elif TD_FREEBSD || TD_OPENBSD || TD_NETBSD
   #define TD_POLL_KQUEUE 1
   #define TD_EVENTFD_BSD 1
 #elif TD_CYGWIN
@@ -40,7 +40,7 @@
 
 #if TD_EMSCRIPTEN
   #define TD_THREAD_UNSUPPORTED 1
-#elif TD_TIZEN
+#elif TD_TIZEN || TD_LINUX || TD_DARWIN
   #define TD_THREAD_PTHREAD 1
 #else
   #define TD_THREAD_STL 1

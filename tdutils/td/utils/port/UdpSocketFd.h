@@ -45,6 +45,9 @@ class UdpSocketFd {
   UdpSocketFd(const UdpSocketFd &) = delete;
   UdpSocketFd &operator=(const UdpSocketFd &) = delete;
 
+  Result<uint32> maximize_snd_buffer(uint32 max_buffer_size = 0);
+  Result<uint32> maximize_rcv_buffer(uint32 max_buffer_size = 0);
+
   static Result<UdpSocketFd> open(const IPAddress &address) TD_WARN_UNUSED_RESULT;
 
   PollableFdInfo &get_poll_info();
@@ -81,6 +84,8 @@ class UdpSocketFd {
 #endif
 
  private:
+  static constexpr uint32 default_udp_max_snd_buffer_size = (1 << 24);
+  static constexpr uint32 default_udp_max_rcv_buffer_size = (1 << 24);
   std::unique_ptr<detail::UdpSocketFdImpl, detail::UdpSocketFdImplDeleter> impl_;
   explicit UdpSocketFd(unique_ptr<detail::UdpSocketFdImpl> impl);
 };

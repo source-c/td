@@ -45,6 +45,10 @@
   #define TD_LINUX 1
 #elif defined(__FreeBSD__)
   #define TD_FREEBSD 1
+#elif defined(__OpenBSD__)
+  #define TD_OPENBSD 1
+#elif defined(__NetBSD__)
+  #define TD_NETBSD 1
 #elif defined(__CYGWIN__)
   #define TD_CYGWIN 1
 #elif defined(__EMSCRIPTEN__)
@@ -104,5 +108,9 @@
 #endif
 
 #define TD_CONCURRENCY_PAD 128
+
+#if !TD_WINDOWS && defined(__SIZEOF_INT128__)
+#define TD_HAVE_INT128 1
+#endif
 
 // clang-format on

@@ -535,7 +535,7 @@ void InlineQueriesManager::answer_inline_query(int64 inline_query_id, bool is_pe
         id = std::move(sticker->id_);
         thumbnail_url = std::move(sticker->thumbnail_url_);
         content_url = std::move(sticker->sticker_url_);
-        content_type = "image/webp";
+        content_type = "image/webp";  // or "application/x-tgsticker"; not used for previously uploaded files
         width = sticker->sticker_width_;
         height = sticker->sticker_height_;
         is_gallery = true;
@@ -852,6 +852,11 @@ td_api::object_ptr<td_api::file> copy(const td_api::file &obj) {
 }
 
 template <>
+tl_object_ptr<td_api::minithumbnail> copy(const td_api::minithumbnail &obj) {
+  return make_tl_object<td_api::minithumbnail>(obj.width_, obj.height_, obj.data_);
+}
+
+template <>
 tl_object_ptr<td_api::photoSize> copy(const td_api::photoSize &obj) {
   return make_tl_object<td_api::photoSize>(obj.type_, copy(obj.photo_), obj.width_, obj.height_);
 }
@@ -885,36 +890,40 @@ tl_object_ptr<td_api::maskPosition> copy(const td_api::maskPosition &obj) {
 template <>
 tl_object_ptr<td_api::animation> copy(const td_api::animation &obj) {
   return make_tl_object<td_api::animation>(obj.duration_, obj.width_, obj.height_, obj.file_name_, obj.mime_type_,
-                                           copy(obj.thumbnail_), copy(obj.animation_));
+                                           copy(obj.minithumbnail_), copy(obj.thumbnail_), copy(obj.animation_));
 }
 
 template <>
 tl_object_ptr<td_api::audio> copy(const td_api::audio &obj) {
   return make_tl_object<td_api::audio>(obj.duration_, obj.title_, obj.performer_, obj.file_name_, obj.mime_type_,
-                                       copy(obj.album_cover_thumbnail_), copy(obj.audio_));
+                                       copy(obj.album_cover_minithumbnail_), copy(obj.album_cover_thumbnail_),
+                                       copy(obj.audio_));
 }
 
 template <>
 tl_object_ptr<td_api::document> copy(const td_api::document &obj) {
-  return make_tl_object<td_api::document>(obj.file_name_, obj.mime_type_, copy(obj.thumbnail_), copy(obj.document_));
+  return make_tl_object<td_api::document>(obj.file_name_, obj.mime_type_, copy(obj.minithumbnail_),
+                                          copy(obj.thumbnail_), copy(obj.document_));
 }
 
 template <>
 tl_object_ptr<td_api::photo> copy(const td_api::photo &obj) {
-  return make_tl_object<td_api::photo>(obj.has_stickers_, transform(obj.sizes_, copy_photo_size));
+  return make_tl_object<td_api::photo>(obj.has_stickers_, copy(obj.minithumbnail_),
+                                       transform(obj.sizes_, copy_photo_size));
 }
 
 template <>
 tl_object_ptr<td_api::sticker> copy(const td_api::sticker &obj) {
-  return make_tl_object<td_api::sticker>(obj.set_id_, obj.width_, obj.height_, obj.emoji_, obj.is_mask_,
-                                         copy(obj.mask_position_), copy(obj.thumbnail_), copy(obj.sticker_));
+  return make_tl_object<td_api::sticker>(obj.set_id_, obj.width_, obj.height_, obj.emoji_, obj.is_animated_,
+                                         obj.is_mask_, copy(obj.mask_position_), copy(obj.thumbnail_),
+                                         copy(obj.sticker_));
 }
 
 template <>
 tl_object_ptr<td_api::video> copy(const td_api::video &obj) {
   return make_tl_object<td_api::video>(obj.duration_, obj.width_, obj.height_, obj.file_name_, obj.mime_type_,
-                                       obj.has_stickers_, obj.supports_streaming_, copy(obj.thumbnail_),
-                                       copy(obj.video_));
+                                       obj.has_stickers_, obj.supports_streaming_, copy(obj.minithumbnail_),
+                                       copy(obj.thumbnail_), copy(obj.video_));
 }
 
 template <>
@@ -1063,7 +1072,7 @@ string InlineQueriesManager::get_web_document_url(const tl_object_ptr<telegram_a
     return {};
   }
 
-  string url;
+  Slice url;
   switch (web_document_ptr->get_id()) {
     case telegram_api::webDocument::ID: {
       auto web_document = static_cast<const telegram_api::webDocument *>(web_document_ptr.get());
@@ -1260,15 +1269,11 @@ void InlineQueriesManager::on_get_inline_query_results(UserId bot_user_id, uint6
           LOG_IF(ERROR, !is_photo) << "Wrong result type " << result->type_;
           auto photo = make_tl_object<td_api::inlineQueryResultPhoto>();
           photo->id_ = std::move(result->id_);
-          auto photo_ptr = std::move(result->photo_);
-          int32 photo_id = photo_ptr->get_id();
-          if (photo_id == telegram_api::photoEmpty::ID) {
+          Photo p = get_photo(td_->file_manager_.get(), std::move(result->photo_), DialogId());
+          if (p.id == -2) {
             LOG(ERROR) << "Receive empty cached photo in the result of inline query";
             break;
           }
-          CHECK(photo_id == telegram_api::photo::ID);
-
-          Photo p = get_photo(td_->file_manager_.get(), move_tl_object_as<telegram_api::photo>(photo_ptr), DialogId());
           photo->photo_ = get_photo_object(td_->file_manager_.get(), &p);
           photo->title_ = std::move(result->title_);
           photo->description_ = std::move(result->description_);

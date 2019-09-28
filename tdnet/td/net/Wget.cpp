@@ -22,8 +22,8 @@
 
 namespace td {
 
-Wget::Wget(Promise<HttpQueryPtr> promise, string url, std::vector<std::pair<string, string>> headers, int32 timeout_in,
-           int32 ttl, bool prefer_ipv6, SslStream::VerifyPeer verify_peer)
+Wget::Wget(Promise<unique_ptr<HttpQuery>> promise, string url, std::vector<std::pair<string, string>> headers,
+           int32 timeout_in, int32 ttl, bool prefer_ipv6, SslStream::VerifyPeer verify_peer)
     : promise_(std::move(promise))
     , input_url_(std::move(url))
     , headers_(std::move(headers))
@@ -34,8 +34,7 @@ Wget::Wget(Promise<HttpQueryPtr> promise, string url, std::vector<std::pair<stri
 }
 
 Status Wget::try_init() {
-  string input_url = input_url_;
-  TRY_RESULT(url, parse_url(MutableSlice(input_url)));
+  TRY_RESULT(url, parse_url(input_url_));
   TRY_RESULT(ascii_host, idn_to_ascii(url.host_));
   url.host_ = std::move(ascii_host);
 
@@ -90,7 +89,7 @@ void Wget::loop() {
   }
 }
 
-void Wget::handle(HttpQueryPtr result) {
+void Wget::handle(unique_ptr<HttpQuery> result) {
   on_ok(std::move(result));
 }
 
@@ -98,8 +97,9 @@ void Wget::on_connection_error(Status error) {
   on_error(std::move(error));
 }
 
-void Wget::on_ok(HttpQueryPtr http_query_ptr) {
+void Wget::on_ok(unique_ptr<HttpQuery> http_query_ptr) {
   CHECK(promise_);
+  CHECK(http_query_ptr);
   if ((http_query_ptr->code_ == 301 || http_query_ptr->code_ == 302 || http_query_ptr->code_ == 307 ||
        http_query_ptr->code_ == 308) &&
       ttl_ > 0) {
@@ -130,7 +130,7 @@ void Wget::start_up() {
 }
 
 void Wget::timeout_expired() {
-  on_error(Status::Error("Timeout expired"));
+  on_error(Status::Error("Response timeout expired"));
 }
 
 void Wget::tear_down() {

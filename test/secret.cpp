@@ -632,7 +632,7 @@ class Master : public Actor {
     int32 binlog_generation_ = 0;
     void sync_binlog(int32 binlog_generation, Promise<> promise) {
       if (binlog_generation != binlog_generation_) {
-        return promise.set_error(Status::Error("binlog generation mismatch"));
+        return promise.set_error(Status::Error("Binlog generation mismatch"));
       }
       binlog_->force_sync(std::move(promise));
     }
@@ -757,7 +757,7 @@ class Master : public Actor {
     return get_by_id(3 - get_link_token());
   }
   void start_up() override {
-    set_context(std::make_shared<Global>());
+    auto old_context = set_context(std::make_shared<Global>());
     alice_ = create_actor<SecretChatProxy>("SecretChatProxy alice", "alice", actor_shared(this, 1));
     bob_ = create_actor<SecretChatProxy>("SecretChatProxy bob", "bob", actor_shared(this, 2));
     send_closure(alice_->get_actor_unsafe()->actor_, &SecretChatActor::create_chat, 2, 0, 123,
@@ -991,10 +991,10 @@ void FakeSecretChatContext::on_delete_messages(std::vector<int64> random_id, Pro
   promise.set_value(Unit());
 }
 void FakeSecretChatContext::on_flush_history(MessageId, Promise<> promise) {
-  promise.set_error(Status::Error("unsupported"));
+  promise.set_error(Status::Error("Unsupported"));
 }
 void FakeSecretChatContext::on_read_message(int64, Promise<> promise) {
-  promise.set_error(Status::Error("unsupported"));
+  promise.set_error(Status::Error("Unsupported"));
 }
 
 TEST(Secret, go) {

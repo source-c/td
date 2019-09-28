@@ -166,13 +166,7 @@ bool NotificationManager::is_disabled() const {
   return !td_->auth_manager_->is_authorized() || td_->auth_manager_->is_bot() || G()->close_flag();
 }
 
-namespace {
-
-struct ActiveNotificationsUpdate {
-  const td_api::updateActiveNotifications *update;
-};
-
-StringBuilder &operator<<(StringBuilder &string_builder, const ActiveNotificationsUpdate &update) {
+StringBuilder &operator<<(StringBuilder &string_builder, const NotificationManager::ActiveNotificationsUpdate &update) {
   if (update.update == nullptr) {
     return string_builder << "null";
   }
@@ -190,11 +184,10 @@ StringBuilder &operator<<(StringBuilder &string_builder, const ActiveNotificatio
   return string_builder << ']';
 }
 
-ActiveNotificationsUpdate as_active_notifications_update(const td_api::updateActiveNotifications *update) {
+NotificationManager::ActiveNotificationsUpdate NotificationManager::as_active_notifications_update(
+    const td_api::updateActiveNotifications *update) {
   return ActiveNotificationsUpdate{update};
 }
-
-}  // namespace
 
 string NotificationManager::get_is_contact_registered_notifications_synchronized_key() {
   return "notifications_contact_registered_sync_state";
@@ -248,18 +241,24 @@ void NotificationManager::init() {
 
   auto call_notification_group_ids_string = G()->td_db()->get_binlog_pmc()->get("notification_call_group_ids");
   if (!call_notification_group_ids_string.empty()) {
-    call_notification_group_ids_ = transform(full_split(call_notification_group_ids_string, ','), [](Slice str) {
+    auto call_notification_group_ids = transform(full_split(call_notification_group_ids_string, ','), [](Slice str) {
       return NotificationGroupId{to_integer_safe<int32>(str).ok()};
     });
-    VLOG(notifications) << "Load call_notification_group_ids_ = " << call_notification_group_ids_;
-    for (auto &group_id : call_notification_group_ids_) {
+    VLOG(notifications) << "Load call_notification_group_ids = " << call_notification_group_ids;
+    for (auto &group_id : call_notification_group_ids) {
       if (group_id.get() > current_notification_group_id_.get()) {
         LOG(ERROR) << "Fix current notification group id from " << current_notification_group_id_ << " to " << group_id;
         current_notification_group_id_ = group_id;
         G()->td_db()->get_binlog_pmc()->set("notification_group_id_current",
                                             to_string(current_notification_group_id_.get()));
       }
-      available_call_notification_group_ids_.insert(group_id);
+      auto it = get_group_force(group_id);
+      if (it != groups_.end()) {
+        LOG(ERROR) << "Have " << it->first << " " << it->second << " as a call notification group";
+      } else {
+        call_notification_group_ids_.push_back(group_id);
+        available_call_notification_group_ids_.insert(group_id);
+      }
     }
   }
 
@@ -597,6 +596,13 @@ void NotificationManager::on_get_message_notifications_from_database(Notificatio
       notifications.pop_back();
     }
   }
+  auto first_message_id = get_first_message_id(group);
+  if (first_message_id.is_valid()) {
+    while (!notifications.empty() && notifications.back().type->get_message_id().get() >= first_message_id.get()) {
+      // possible if notifications was added after the database request was sent
+      notifications.pop_back();
+    }
+  }
 
   add_notifications_to_group_begin(std::move(group_it), std::move(notifications));
 
@@ -761,8 +767,7 @@ void NotificationManager::try_reuse_notification_group_id(NotificationGroupId gr
 
   auto group_it = get_group(group_id);
   if (group_it != groups_.end()) {
-    CHECK(group_it->first.last_notification_date == 0);
-    LOG_CHECK(group_it->second.total_count == 0)
+    LOG_CHECK(group_it->first.last_notification_date == 0 && group_it->second.total_count == 0)
         << running_get_difference_ << " " << delayed_notification_update_count_ << " "
         << unreceived_notification_update_count_ << " " << pending_updates_[group_id.get()].size() << " "
         << group_it->first << " " << group_it->second;
@@ -903,13 +908,7 @@ void NotificationManager::add_notification(NotificationGroupId group_id, Notific
   group.pending_notifications.push_back(std::move(notification));
 }
 
-namespace {
-
-struct NotificationUpdate {
-  const td_api::Update *update;
-};
-
-StringBuilder &operator<<(StringBuilder &string_builder, const NotificationUpdate &update) {
+StringBuilder &operator<<(StringBuilder &string_builder, const NotificationManager::NotificationUpdate &update) {
   if (update.update == nullptr) {
     return string_builder << "null";
   }
@@ -938,11 +937,9 @@ StringBuilder &operator<<(StringBuilder &string_builder, const NotificationUpdat
   }
 }
 
-NotificationUpdate as_notification_update(const td_api::Update *update) {
+NotificationManager::NotificationUpdate NotificationManager::as_notification_update(const td_api::Update *update) {
   return NotificationUpdate{update};
 }
-
-}  // namespace
 
 void NotificationManager::add_update(int32 group_id, td_api::object_ptr<td_api::Update> update) {
   if (!is_binlog_processed_ || !is_inited_) {
@@ -1610,6 +1607,13 @@ void NotificationManager::edit_notification(NotificationGroupId group_id, Notifi
   for (size_t i = 0; i < group.notifications.size(); i++) {
     auto &notification = group.notifications[i];
     if (notification.notification_id == notification_id) {
+      if (notification.type->get_message_id() != type->get_message_id() ||
+          notification.type->is_temporary() != type->is_temporary()) {
+        LOG(ERROR) << "Ignore edit of " << notification_id << " with " << *type << ", because previous type is "
+                   << *notification.type;
+        return;
+      }
+
       notification.type = std::move(type);
       if (i + max_notification_group_size_ >= group.notifications.size() &&
           !(get_last_updated_group_key() < group_it->first)) {
@@ -1621,6 +1625,13 @@ void NotificationManager::edit_notification(NotificationGroupId group_id, Notifi
   }
   for (auto &notification : group.pending_notifications) {
     if (notification.notification_id == notification_id) {
+      if (notification.type->get_message_id() != type->get_message_id() ||
+          notification.type->is_temporary() != type->is_temporary()) {
+        LOG(ERROR) << "Ignore edit of " << notification_id << " with " << *type << ", because previous type is "
+                   << *notification.type;
+        return;
+      }
+
       notification.type = std::move(type);
       return;
     }
@@ -1845,9 +1856,10 @@ void NotificationManager::remove_notification(NotificationGroupId group_id, Noti
     }
   }
 
+  bool have_all_notifications = group_it->second.type == NotificationGroupType::Calls ||
+                                group_it->second.type == NotificationGroupType::SecretChat;
   bool is_total_count_changed = false;
-  if ((group_it->second.type != NotificationGroupType::Calls && is_permanent) ||
-      (group_it->second.type == NotificationGroupType::Calls && is_found)) {
+  if ((!have_all_notifications && is_permanent) || (have_all_notifications && is_found)) {
     if (group_it->second.total_count == 0) {
       LOG(ERROR) << "Total notification count became negative in " << group_id << " after removing " << notification_id;
     } else {
@@ -2013,7 +2025,8 @@ void NotificationManager::remove_notification_group(NotificationGroupId group_id
     group_it->second.notifications.erase(group_it->second.notifications.begin(),
                                          group_it->second.notifications.begin() + notification_delete_end);
   }
-  if (group_it->second.type == NotificationGroupType::Calls) {
+  if (group_it->second.type == NotificationGroupType::Calls ||
+      group_it->second.type == NotificationGroupType::SecretChat) {
     new_total_count = static_cast<int32>(group_it->second.notifications.size());
   }
   if (group_it->second.total_count == new_total_count) {
@@ -2091,6 +2104,7 @@ void NotificationManager::remove_temporary_notifications(NotificationGroupId gro
   }
   auto removed_notification_count = narrow_cast<int32>(old_group_size - notification_pos);
   if (removed_notification_count == 0) {
+    CHECK(get_temporary_notification_total_count(group_it->second) == 0);
     return;
   }
 
@@ -2104,7 +2118,9 @@ void NotificationManager::remove_temporary_notifications(NotificationGroupId gro
 
   vector<int32> removed_notification_ids;
   for (auto i = notification_pos; i < old_group_size; i++) {
-    CHECK(group.notifications[i].type->is_temporary());
+    LOG_CHECK(group.notifications[i].type->is_temporary())
+        << notification_pos << ' ' << i << ' ' << old_group_size << ' ' << removed_notification_count << ' '
+        << group.notifications[i] << ' ' << group << ' ' << group_it->first;
     VLOG(notifications) << "Remove temporary " << group.notifications[i] << " from " << group_id;
     auto notification_id = group.notifications[i].notification_id;
     on_notification_removed(notification_id);
@@ -2131,6 +2147,7 @@ void NotificationManager::remove_temporary_notifications(NotificationGroupId gro
     }
     std::reverse(added_notifications.begin(), added_notifications.end());
   }
+  CHECK(get_temporary_notification_total_count(group_it->second) == 0);
 
   on_notifications_removed(std::move(group_it), std::move(added_notifications), std::move(removed_notification_ids),
                            false);
@@ -2326,7 +2343,8 @@ void NotificationManager::remove_call_notification(DialogId dialog_id, CallId ca
         force_flush_pending_updates(group_id, "reuse call group_id");
 
         auto group_it = get_group(group_id);
-        CHECK(group_it->first.dialog_id == dialog_id);
+        LOG_CHECK(group_it->first.dialog_id == dialog_id)
+            << group_id << ' ' << dialog_id << ' ' << group_it->first << ' ' << group_it->second;
         CHECK(group_it->first.last_notification_date == 0);
         CHECK(group_it->second.total_count == 0);
         CHECK(group_it->second.notifications.empty());
@@ -2707,6 +2725,9 @@ string NotificationManager::convert_loc_key(const string &loc_key) {
       if (loc_key == "MESSAGE_DOC") {
         return "MESSAGE_DOCUMENT";
       }
+      if (loc_key == "ENCRYPTED_MESSAGE") {
+        return "MESSAGE";
+      }
       break;
     case 'E':
       if (loc_key == "PINNED_GEO") {
@@ -2992,6 +3013,7 @@ Status NotificationManager::process_push_notification_payload(string payload, bo
     } else {
       LOG(ERROR) << "Receive unencrypted SESSION_REVOKE push notification";
     }
+    promise.set_value(Unit());
     return Status::OK();
   }
 
@@ -3202,7 +3224,8 @@ Status NotificationManager::process_push_notification_payload(string payload, bo
 
     int32 flags = telegram_api::user::FIRST_NAME_MASK | telegram_api::user::MIN_MASK;
     if (sender_access_hash != -1) {
-      flags |= telegram_api::user::ACCESS_HASH_MASK;
+      // set phone number flag to show that this is a full access hash
+      flags |= telegram_api::user::ACCESS_HASH_MASK | telegram_api::user::PHONE_MASK;
     }
     if (sender_photo != nullptr) {
       flags |= telegram_api::user::PHOTO_MASK;
@@ -3210,8 +3233,8 @@ Status NotificationManager::process_push_notification_payload(string payload, bo
     auto user = telegram_api::make_object<telegram_api::user>(
         flags, false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/,
         false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/,
-        false /*ignored*/, false /*ignored*/, sender_user_id.get(), sender_access_hash, sender_name, string(), string(),
-        string(), std::move(sender_photo), nullptr, 0, string(), string(), string());
+        false /*ignored*/, false /*ignored*/, false /*ignored*/, sender_user_id.get(), sender_access_hash, sender_name,
+        string(), string(), string(), std::move(sender_photo), nullptr, 0, string(), string(), string());
     td_->contacts_manager_->on_get_user(std::move(user), "process_push_notification_payload");
   }
 
@@ -3530,8 +3553,8 @@ void NotificationManager::add_message_push_notification(DialogId dialog_id, Mess
     auto user = telegram_api::make_object<telegram_api::user>(
         flags, false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/,
         false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/, false /*ignored*/,
-        false /*ignored*/, false /*ignored*/, sender_user_id.get(), 0, sender_name, string(), string(), string(),
-        nullptr, nullptr, 0, string(), string(), string());
+        false /*ignored*/, false /*ignored*/, false /*ignored*/, sender_user_id.get(), 0, sender_name, string(),
+        string(), string(), nullptr, nullptr, 0, string(), string(), string());
     td_->contacts_manager_->on_get_user(std::move(user), "add_message_push_notification");
   }
 

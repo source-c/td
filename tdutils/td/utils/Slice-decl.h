@@ -52,11 +52,16 @@ class MutableSlice {
   MutableSlice substr(size_t from, size_t size) const;
   size_t find(char c) const;
   size_t rfind(char c) const;
+  void fill(char c);
+  void fill_zero();
+  void fill_zero_secure();
 
   void copy_from(Slice from);
 
   char &back();
   char &operator[](size_t i);
+
+  static const size_t npos = static_cast<size_t>(-1);
 };
 
 class Slice {
@@ -120,6 +125,8 @@ class Slice {
 
   char back() const;
   char operator[](size_t i) const;
+
+  static const size_t npos = static_cast<size_t>(-1);
 };
 
 bool operator==(const Slice &a, const Slice &b);

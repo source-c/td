@@ -10,6 +10,7 @@
 
 #include "td/telegram/files/FileId.hpp"
 #include "td/telegram/Photo.hpp"
+#include "td/telegram/Version.h"
 
 #include "td/utils/common.h"
 #include "td/utils/tl_helpers.h"
@@ -29,6 +30,7 @@ void VideosManager::store_video(FileId file_id, StorerT &storer) const {
   store(video->mime_type, storer);
   store(video->duration, storer);
   store(video->dimensions, storer);
+  store(video->minithumbnail, storer);
   store(video->thumbnail, storer);
   store(file_id, storer);
   if (video->has_stickers) {
@@ -47,10 +49,16 @@ FileId VideosManager::parse_video(ParserT &parser) {
   parse(video->mime_type, parser);
   parse(video->duration, parser);
   parse(video->dimensions, parser);
+  if (parser.version() >= static_cast<int32>(Version::SupportMinithumbnails)) {
+    parse(video->minithumbnail, parser);
+  }
   parse(video->thumbnail, parser);
   parse(video->file_id, parser);
   if (video->has_stickers) {
     parse(video->sticker_file_ids, parser);
+  }
+  if (parser.get_error() != nullptr || !video->file_id.is_valid()) {
+    return FileId();
   }
   return on_get_video(std::move(video), false);
 }

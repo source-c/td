@@ -111,11 +111,11 @@ Stat from_native_stat(const struct ::stat &buf) {
   return res;
 }
 
-Stat fstat(int native_fd) {
+Result<Stat> fstat(int native_fd) {
   struct ::stat buf;
-  int err = detail::skip_eintr([&] { return ::fstat(native_fd, &buf); });
-  auto fstat_errno = errno;
-  LOG_IF(FATAL, err < 0) << Status::PosixError(fstat_errno, PSLICE() << "Stat for fd " << native_fd << " failed");
+  if (detail::skip_eintr([&] { return ::fstat(native_fd, &buf); }) < 0) {
+    return OS_ERROR(PSLICE() << "Stat for fd " << native_fd << " failed");
+  }
   return detail::from_native_stat(buf);
 }
 
@@ -135,7 +135,7 @@ Status update_atime(int native_fd) {
   }
   return Status::OK();
 #elif TD_DARWIN
-  auto info = fstat(native_fd);
+  TRY_RESULT(info, fstat(native_fd));
   timeval upd[2];
   auto now = Clocks::system();
   // access time
@@ -192,7 +192,7 @@ Result<MemStat> mem_stat() {
 
   if (KERN_SUCCESS !=
       task_info(mach_task_self(), TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&t_info), &t_info_count)) {
-    return Status::Error("task_info failed");
+    return Status::Error("Call to task_info failed");
   }
   MemStat res;
   res.resident_size_ = t_info.resident_size;
@@ -296,7 +296,7 @@ Status cpu_stat_self(CpuStat &stat) {
       s++;
       pass_cnt++;
     } else {
-      return Status::Error("unexpected end of proc file");
+      return Status::Error("Unexpected end of proc file");
     }
   }
   return Status::OK();
@@ -349,7 +349,7 @@ Result<CpuStat> cpu_stat() {
 namespace td {
 
 Result<Stat> stat(CSlice path) {
-  TRY_RESULT(fd, FileFd::open(path, FileFd::Flags::Read));
+  TRY_RESULT(fd, FileFd::open(path, FileFd::Flags::Read | FileFd::PrivateFlags::WinStat));
   return fd.stat();
 }
 

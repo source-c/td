@@ -36,7 +36,7 @@ class RawConnection {
     virtual void on_write(uint64 bytes) = 0;
 
     virtual void on_pong() = 0;   // called when we know that connection is alive
-    virtual void on_error() = 0;  // called on RawConnectin error. Such error should be very rare on good connections.
+    virtual void on_error() = 0;  // called on RawConnection error. Such error should be very rare on good connections.
     virtual void on_mtproto_error() = 0;
   };
   RawConnection() = default;
@@ -76,7 +76,7 @@ class RawConnection {
     virtual ~Callback() = default;
     virtual Status on_raw_packet(const PacketInfo &info, BufferSlice packet) = 0;
     virtual Status on_quick_ack(uint64 quick_ack_token) {
-      return Status::Error("quick acks unsupported fully, but still used");
+      return Status::Error("Quick acks unsupported fully, but still used");
     }
     virtual Status before_write() {
       return Status::OK();

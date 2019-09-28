@@ -88,6 +88,7 @@ Result<FileLoader::FileInfo> FileUploader::init() {
   res.is_size_final = local_is_ready_;
   res.part_size = part_size;
   res.ready_parts = std::move(parts);
+  res.is_upload = true;
   return res;
 }
 
@@ -119,6 +120,9 @@ Result<FileLoader::PrefixInfo> FileUploader::on_update_local_location(const Loca
     file_type = location.partial().file_type_;
   } else {
     path = location.full().path_;
+    if (path.empty()) {
+      return Status::Error("FullLocalFileLocation with empty path");
+    }
     local_is_ready = true;
     file_type = location.full().file_type_;
   }
@@ -141,7 +145,7 @@ Result<FileLoader::PrefixInfo> FileUploader::on_update_local_location(const Loca
     is_temp = true;
   }
 
-  if (!path.empty() && path != fd_path_) {
+  if (!path.empty() && (path != fd_path_ || fd_.empty())) {
     auto res_fd = FileFd::open(path, FileFd::Read);
 
     // Race: partial location could be already deleted. Just ignore such locations
@@ -161,16 +165,16 @@ Result<FileLoader::PrefixInfo> FileUploader::on_update_local_location(const Loca
     fd_path_ = path;
     is_temp_ = is_temp;
   }
-
   if (local_is_ready) {
     CHECK(!fd_.empty());
-    local_size = fd_.get_size();
+    TRY_RESULT(local_file_size, fd_.get_size());
+    local_size = local_file_size;
     LOG(INFO) << "Set file local_size to " << local_size;
     if (local_size == 0) {
       return Status::Error("Can't upload empty file");
     }
   } else if (!fd_.empty()) {
-    auto real_local_size = fd_.get_size();
+    TRY_RESULT(real_local_size, fd_.get_size());
     if (real_local_size < local_size) {
       LOG(ERROR) << tag("real_local_size", real_local_size) << " < " << tag("local_size", local_size);
       PrefixInfo info;
@@ -225,7 +229,8 @@ Status FileUploader::generate_iv_map() {
     if (read_size != part_size) {
       return Status::Error("Failed to read file part (for iv_map)");
     }
-    aes_ige_encrypt(encryption_key.key(), &encryption_key.mutable_iv(), bytes.as_slice(), bytes.as_slice());
+    aes_ige_encrypt(as_slice(encryption_key.key()), as_slice(encryption_key.mutable_iv()), bytes.as_slice(),
+                    bytes.as_slice());
     iv_map_.push_back(encryption_key.mutable_iv());
   }
   generate_iv_ = encryption_key.iv_slice().str();
@@ -253,7 +258,7 @@ Result<std::pair<NetQueryPtr, bool>> FileUploader::start_part(Part part, int32 p
   if (encryption_key_.is_secret()) {
     Random::secure_bytes(bytes.as_slice().substr(part.size));
     if (next_offset_ == part.offset) {
-      aes_ige_encrypt(encryption_key_.key(), &iv_, bytes.as_slice(), bytes.as_slice());
+      aes_ige_encrypt(as_slice(encryption_key_.key()), as_slice(iv_), bytes.as_slice(), bytes.as_slice());
       next_offset_ += static_cast<int64>(bytes.size());
     } else {
       if (part.id >= static_cast<int32>(iv_map_.size())) {
@@ -261,7 +266,7 @@ Result<std::pair<NetQueryPtr, bool>> FileUploader::start_part(Part part, int32 p
       }
       CHECK(part.id < static_cast<int32>(iv_map_.size()) && part.id >= 0);
       auto iv = iv_map_[part.id];
-      aes_ige_encrypt(encryption_key_.key(), &iv, bytes.as_slice(), bytes.as_slice());
+      aes_ige_encrypt(as_slice(encryption_key_.key()), as_slice(iv), bytes.as_slice(), bytes.as_slice());
     }
   }
 

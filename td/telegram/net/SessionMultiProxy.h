@@ -37,7 +37,6 @@ class SessionMultiProxy : public Actor {
   void update_destroy_auth_key(bool need_destroy_auth_key);
 
  private:
-  size_t pos_ = 0;
   int32 session_count_ = 0;
   std::shared_ptr<AuthDataShared> auth_data_;
   bool is_main_ = false;
@@ -57,8 +56,6 @@ class SessionMultiProxy : public Actor {
   void init();
 
   bool get_pfs_flag() const;
-
-  void update_auth_state();
 
   void on_query_finished(uint32 generation, int session_id);
 };

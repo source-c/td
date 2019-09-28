@@ -10,6 +10,7 @@
 
 #include "td/telegram/files/FileId.hpp"
 #include "td/telegram/Photo.hpp"
+#include "td/telegram/Version.h"
 
 #include "td/utils/common.h"
 #include "td/utils/tl_helpers.h"
@@ -26,6 +27,7 @@ void AudiosManager::store_audio(FileId file_id, StorerT &storer) const {
   store(audio->duration, storer);
   store(audio->title, storer);
   store(audio->performer, storer);
+  store(audio->minithumbnail, storer);
   store(audio->thumbnail, storer);
   store(file_id, storer);
 }
@@ -38,8 +40,14 @@ FileId AudiosManager::parse_audio(ParserT &parser) {
   parse(audio->duration, parser);
   parse(audio->title, parser);
   parse(audio->performer, parser);
+  if (parser.version() >= static_cast<int32>(Version::SupportMinithumbnails)) {
+    parse(audio->minithumbnail, parser);
+  }
   parse(audio->thumbnail, parser);
   parse(audio->file_id, parser);
+  if (parser.get_error() != nullptr || !audio->file_id.is_valid()) {
+    return FileId();
+  }
   return on_get_audio(std::move(audio), false);
 }
 

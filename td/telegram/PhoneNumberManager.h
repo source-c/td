@@ -9,6 +9,7 @@
 #include "td/telegram/net/NetActor.h"
 #include "td/telegram/net/NetQuery.h"
 #include "td/telegram/SendCodeHelper.h"
+#include "td/telegram/td_api.h"
 
 #include "td/actor/actor.h"
 
@@ -23,9 +24,10 @@ class PhoneNumberManager : public NetActor {
   PhoneNumberManager(Type type, ActorShared<> parent);
   void get_state(uint64 query_id);
 
-  void set_phone_number(uint64 query_id, string phone_number, bool allow_flash_call, bool is_current_phone_number);
-  void set_phone_number_and_hash(uint64 query_id, string hash, string phone_number, bool allow_flash_call,
-                                 bool is_current_phone_number);
+  using Settings = td_api::object_ptr<td_api::phoneNumberAuthenticationSettings>;
+
+  void set_phone_number(uint64 query_id, string phone_number, Settings settings);
+  void set_phone_number_and_hash(uint64 query_id, string hash, string phone_number, Settings settings);
 
   void resend_authentication_code(uint64 query_id);
   void check_code(uint64 query_id, string code);
@@ -50,7 +52,7 @@ class PhoneNumberManager : public NetActor {
   void start_net_query(NetQueryType net_query_type, NetQueryPtr net_query);
 
   template <class T>
-  void process_send_code_result(uint64 query_id, T r_send_code);
+  void process_send_code_result(uint64 query_id, const T &send_code);
 
   template <class T>
   void send_new_check_code_query(const T &query);
